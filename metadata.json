@@ -1,0 +1,6 @@
+{
+  "name": "MUGEN Mobile Studio",
+  "description": "Mobile-optimized MUGEN Character Creator/Editor natively supporting SFF/AIR/ACT formats without emulator overhead.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

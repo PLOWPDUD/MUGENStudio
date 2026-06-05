@@ -191,6 +191,10 @@ export default function MugenStudio() {
         const parsedSff = parseSffBinary(buf);
         setSffData(parsedSff);
         setSelectedSpriteIdx(0);
+        // Set fallback actPalette from template SFF
+        if (parsedSff.images.length > 0 && parsedSff.images[0].palette) {
+          setActPalette(new Uint8Array(parsedSff.images[0].palette));
+        }
       } catch (e) {
         console.error("Failed to parse start template SFF:", e);
       }
@@ -627,6 +631,9 @@ export default function MugenStudio() {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
+    
+    const filesArray = Array.from(files);
+    const hasActInSelection = filesArray.some(f => f.name.toLowerCase().endsWith('.act'));
 
     let initialCns = null;
     let initialCmd = null;
@@ -650,7 +657,12 @@ export default function MugenStudio() {
                 setCmdRawText(text);
             } else if (ext === 'sff') {
                 const buffer = await file.arrayBuffer();
-                setSffData(parseSffBinary(buffer));
+                const parsed = parseSffBinary(buffer);
+                setSffData(parsed);
+                // If no .act file in this batch and actPalette is currently null, use first sprite's palette
+                if (!actPalette && !hasActInSelection && parsed.images.length > 0 && parsed.images[0].palette) {
+                   setActPalette(new Uint8Array(parsed.images[0].palette));
+                }
             } else if (ext === 'act') {
                 const buffer = await file.arrayBuffer();
                 setActPalette(parseActBinary(buffer));
@@ -1623,16 +1635,16 @@ export default function MugenStudio() {
                                         />
                                     </div>
                                     <div className="flex flex-col gap-0.5">
-                                        <span className="text-[9px] text-gray-400">Horizontal Flip:</span>
+                                        <span className="text-[9px] text-gray-400">Mirror / Flip:</span>
                                         <select 
                                             className="bg-[#1a1a1a] border border-[#3a3a3a] text-xs p-1 rounded outline-none"
-                                            value={airData.actions[selectedActionId].elements[currentFrame]?.flip || "None"}
+                                            value={airData.actions[selectedActionId].elements[currentFrame]?.flip || ""}
                                             onChange={e => handleUpdateFrameField('flip', e.target.value)}
                                         >
                                             <option value="">None</option>
                                             <option value="H">Horizontal Flip (H)</option>
                                             <option value="V">Vertical Flip (V)</option>
-                                            <option value="HV or VH">Diagonal (HV)</option>
+                                            <option value="HV">Diagonal Flip (HV)</option>
                                         </select>
                                     </div>
                                 </div>

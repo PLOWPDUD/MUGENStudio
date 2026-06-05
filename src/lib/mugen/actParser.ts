@@ -12,11 +12,10 @@ export function parseActBinary(buffer: ArrayBuffer): Uint8Array {
     const palette = new Uint8Array(256 * 4); // Map to RGBA format for web Canvas usage
     
     for (let i = 0; i < 256; i++) {
-        // Read RGB in reverse order for MUGEN .act files (Color 255 is byte 0)
-        const actIndex = 255 - i;
-        palette[i * 4] = view[actIndex * 3];         // R
-        palette[i * 4 + 1] = view[actIndex * 3 + 1]; // G
-        palette[i * 4 + 2] = view[actIndex * 3 + 2]; // B
+        // Read RGB in standard order for MUGEN .act files (Color 0 is byte 0)
+        palette[i * 4] = view[i * 3];         // R
+        palette[i * 4 + 1] = view[i * 3 + 1]; // G
+        palette[i * 4 + 2] = view[i * 3 + 2]; // B
         
         // Alpha mapping: index 0 is transparent (or background) in standard M.U.G.E.N palettes.
         // If an editor wants to force solid color viewing, this can be overridden.

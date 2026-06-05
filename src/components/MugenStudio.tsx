@@ -632,7 +632,7 @@ export default function MugenStudio() {
     const files = e.target.files;
     if (!files) return;
     
-    const filesArray = Array.from(files);
+    const filesArray = Array.from(files) as File[];
     const hasActInSelection = filesArray.some(f => f.name.toLowerCase().endsWith('.act'));
 
     let initialCns = null;
@@ -659,9 +659,12 @@ export default function MugenStudio() {
                 const buffer = await file.arrayBuffer();
                 const parsed = parseSffBinary(buffer);
                 setSffData(parsed);
-                // If no .act file in this batch and actPalette is currently null, use first sprite's palette
-                if (!actPalette && !hasActInSelection && parsed.images.length > 0 && parsed.images[0].palette) {
-                   setActPalette(new Uint8Array(parsed.images[0].palette));
+                // If no .act file in this batch, use first available palette from the SFF as default
+                if (!hasActInSelection) {
+                   const firstPalSprite = parsed.images.find(img => img.palette);
+                   if (firstPalSprite && firstPalSprite.palette) {
+                      setActPalette(new Uint8Array(firstPalSprite.palette));
+                   }
                 }
             } else if (ext === 'act') {
                 const buffer = await file.arrayBuffer();
@@ -1232,10 +1235,9 @@ export default function MugenStudio() {
         if (pal) {
           const actBuffer = new Uint8Array(768);
           for (let i = 0; i < 256; i++) {
-            const actIndex = 255 - i;
-            actBuffer[actIndex * 3] = pal[i * 4];
-            actBuffer[actIndex * 3 + 1] = pal[i * 4 + 1];
-            actBuffer[actIndex * 3 + 2] = pal[i * 4 + 2];
+            actBuffer[i * 3] = pal[i * 4];
+            actBuffer[i * 3 + 1] = pal[i * 4 + 1];
+            actBuffer[i * 3 + 2] = pal[i * 4 + 2];
           }
           zip.file(`${charNameClean}/${actFile}`, actBuffer);
         }

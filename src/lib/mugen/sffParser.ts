@@ -102,11 +102,33 @@ export function parseSffBinary(buffer: ArrayBuffer): SffData {
     if (nextNodeOffset === 0) break;
   }
 
+  let globalPalette: Uint8Array | undefined;
+  if (view.byteLength >= 768) {
+      const lastPalOffset = view.byteLength - 768;
+      // Check if there's a potential palette at the end of the file (common in SFF v1)
+      // We check if it's likely a palette (standard check is just reading it)
+      globalPalette = new Uint8Array(1024);
+      for (let i = 0; i < 256; i++) {
+          globalPalette[i * 4] = view.getUint8(lastPalOffset + i * 3);
+          globalPalette[i * 4 + 1] = view.getUint8(lastPalOffset + i * 3 + 1);
+          globalPalette[i * 4 + 2] = view.getUint8(lastPalOffset + i * 3 + 2);
+          globalPalette[i * 4 + 3] = i === 0 ? 0 : 255;
+      }
+  }
+
+  // Assign the global palette to images that need it
+  const finalImages = images.map(img => {
+      if (img.isSharedPalette && !img.palette && globalPalette) {
+          return { ...img, palette: globalPalette };
+      }
+      return img;
+  });
+
   return {
     version: v1version,
     numGroups,
     numImages,
-    images,
+    images: finalImages,
     isV2: false
   };
 }
@@ -284,10 +306,9 @@ function decodePcx(buffer: Uint8Array) {
       embeddedPalette = new Uint8Array(1024); // Map to RGBA format 256 * 4
       let palOffset = buffer.length - 768;
       for (let i = 0; i < 256; i++) {
-          const actIndex = 255 - i;
-          embeddedPalette[i * 4] = buffer[palOffset + actIndex * 3];       // R
-          embeddedPalette[i * 4 + 1] = buffer[palOffset + actIndex * 3 + 1]; // G
-          embeddedPalette[i * 4 + 2] = buffer[palOffset + actIndex * 3 + 2]; // B
+          embeddedPalette[i * 4] = buffer[palOffset + i * 3];       // R
+          embeddedPalette[i * 4 + 1] = buffer[palOffset + i * 3 + 1]; // G
+          embeddedPalette[i * 4 + 2] = buffer[palOffset + i * 3 + 2]; // B
           // Alpha mapping: index 0 is transparent (or background) in standard palettes.
           embeddedPalette[i * 4 + 3] = i === 0 ? 0 : 255; 
       }

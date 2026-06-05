@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { 
   File, FolderOpen, Save, Undo, Redo, Scissors, Copy, Clipboard,
   Search, ArrowLeftRight, ZoomIn, ZoomOut, Plus, Minus, Play, Pause, AlertCircle, FileText, Image, PlayCircle, Settings, Trash2, Pen, Move, Hand, PaintBucket, Wand2, Crosshair,
-  Volume2, Music, Download, PlusCircle
+  Volume2, Music, Download, PlusCircle, Square, Eraser
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { parseIniString, stringifyIni } from '../lib/mugen/defParser';
@@ -104,6 +104,7 @@ export default function MugenStudio() {
   const [spriteSearch, setSpriteSearch] = useState('');
   const [selectedSpriteIdx, setSelectedSpriteIdx] = useState<number>(0);
   const [selectedActionId, setSelectedActionId] = useState<number | null>(null);
+  const [selectedClsn, setSelectedClsn] = useState<{ type: 1 | 2; id: number } | null>(null);
   const [currentFrame, setCurrentFrame] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
@@ -126,7 +127,7 @@ export default function MugenStudio() {
   const [panOrig, setPanOrig] = useState({ x: 0, y: 0 });
   const [pan, setPan] = useState({ x: 0, y: 0 });
 
-  const [activeTool, setActiveTool] = useState<'move' | 'pan' | 'paint' | 'eraser' | 'bucket' | 'wand'>('move');
+  const [activeTool, setActiveTool] = useState<'move' | 'pan' | 'paint' | 'eraser' | 'bucket' | 'wand' | 'clsn_edit'>('move');
   const [brushSize, setBrushSize] = useState<number>(1);
   const [isPaintDragging, setIsPaintDragging] = useState(false);
   const [lastPaintPos, setLastPaintPos] = useState<{x: number, y: number} | null>(null);
@@ -255,7 +256,7 @@ export default function MugenStudio() {
         const imgData = ctx.getImageData(0, 0, img.width, img.height);
         
         // Active palette
-        const currentPal = actPalette || sffData?.images[selectedActionId || 0]?.palette || null;
+        const currentPal = actPalette || sffData?.images[selectedSpriteIdx || 0]?.palette || null;
         
         let targetPaletteForProcessing = currentPal;
         if (mode === 'image_palette') {
@@ -299,7 +300,7 @@ export default function MugenStudio() {
             numImages: updatedImages.length,
             images: updatedImages
           });
-          setSelectedActionId(updatedImages.length - 1);
+          setSelectedSpriteIdx(updatedImages.length - 1);
         } else {
           setSffData({
             version: 'ElecbyteSpr\x00',
@@ -307,7 +308,7 @@ export default function MugenStudio() {
             numImages: 1,
             images: [newSprite]
           });
-          setSelectedActionId(0);
+          setSelectedSpriteIdx(0);
         }
       };
       img.src = event.target?.result as string;
@@ -317,8 +318,8 @@ export default function MugenStudio() {
   };
 
   const applyPaint = (clientX: number, clientY: number) => {
-    if (selectedActionId === null || !workspaceRef.current || !sffData) return;
-    const sprite = sffData.images[selectedActionId];
+    if (selectedSpriteIdx === null || !workspaceRef.current || !sffData) return;
+    const sprite = sffData.images[selectedSpriteIdx];
     if (!sprite) return;
     
     // We only need the rect, clickX, clickY for calculating offset
@@ -344,7 +345,7 @@ export default function MugenStudio() {
     
     setSffData(prevSff => {
         if (!prevSff) return prevSff;
-        const currentSprite = prevSff.images[selectedActionId];
+        const currentSprite = prevSff.images[selectedSpriteIdx];
         if (!currentSprite) return prevSff;
         
         const nextSff = { ...prevSff };
@@ -420,7 +421,7 @@ export default function MugenStudio() {
         
         if (changed) {
             nextSprite.pixelIndices = nextIndices;
-            nextSff.images[selectedActionId] = nextSprite;
+            nextSff.images[selectedSpriteIdx] = nextSprite;
             return nextSff;
         }
         return prevSff;
@@ -455,6 +456,7 @@ export default function MugenStudio() {
       setDragOrig({ x: sprite.xOffset, y: sprite.yOffset });
       setPreviewOffset({ x: sprite.xOffset, y: sprite.yOffset });
     } else if (activeMode === 'Animations') {
+      if (activeTool === 'clsn_edit') return; // Don't move sprite while editing CLSN
       if (!airData || selectedActionId === null) return;
       const action = airData.actions[selectedActionId];
       if (!action) return;
@@ -481,6 +483,8 @@ export default function MugenStudio() {
         return;
     }
     if (!isDragging) return;
+    if (activeMode === 'Animations' && activeTool === 'clsn_edit') return;
+
     const dx = clientX - dragStart.x;
     const dy = clientY - dragStart.y;
     
@@ -749,6 +753,29 @@ export default function MugenStudio() {
     setSelectedSpriteIdx(nextImages.length > 0 ? 0 : 0);
   };
 
+  const handleDuplicateSprite = () => {
+    if (!sffData || selectedSpriteIdx === null) return;
+    const spriteToClone = sffData.images[selectedSpriteIdx];
+    if (!spriteToClone) return;
+
+    const newSprite = {
+      ...spriteToClone,
+      image: spriteToClone.image + 1,
+      pixelIndices: new Uint8Array(spriteToClone.pixelIndices),
+      palette: spriteToClone.palette ? new Uint8Array(spriteToClone.palette) : undefined
+    };
+
+    const nextImages = [...sffData.images];
+    nextImages.splice(selectedSpriteIdx + 1, 0, newSprite);
+
+    setSffData({
+      ...sffData,
+      numImages: nextImages.length,
+      images: nextImages
+    });
+    setSelectedSpriteIdx(selectedSpriteIdx + 1);
+  };
+
   const handleAddAnimAction = (actionId: number) => {
     if (!airData) return;
     if (airData.actions[actionId]) {
@@ -879,6 +906,25 @@ export default function MugenStudio() {
       nextAction.clsn1 = nextAction.clsn1.filter((b: any) => b.id !== boxId);
     } else {
       nextAction.clsn2 = nextAction.clsn2.filter((b: any) => b.id !== boxId);
+    }
+
+    nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
+    setAirData(nextAir);
+    syncAirRawText(nextAir);
+  };
+
+  const handleUpdateCollisionBox = (clsnType: 1 | 2, boxId: number, field: string, value: number) => {
+    if (!airData || selectedActionId === null) return;
+    const action = airData.actions[selectedActionId];
+    if (!action) return;
+
+    const nextAir = { ...airData };
+    const nextAction = { ...action };
+
+    if (clsnType === 1) {
+      nextAction.clsn1 = nextAction.clsn1.map((b: any) => b.id === boxId ? { ...b, [field]: value } : b);
+    } else {
+      nextAction.clsn2 = nextAction.clsn2.map((b: any) => b.id === boxId ? { ...b, [field]: value } : b);
     }
 
     nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
@@ -1382,23 +1428,33 @@ export default function MugenStudio() {
                              <button className="px-2 py-0.5 hover:bg-[#444] rounded text-blue-400 font-bold" onClick={() => setSelectedSpriteIdx(Math.min(sffData.numImages - 1, (selectedSpriteIdx || 0) + 1))}>&rarr;</button>
                         </div>
 
-                        {/* Import/Delete Tools */}
-                        <div className="grid grid-cols-2 gap-2 pb-2 border-b border-[#333]">
+                        {/* Import/Delete/Duplicate Tools */}
+                        <div className="flex flex-col gap-2 pb-2 border-b border-[#333]">
+                            <div className="grid grid-cols-2 gap-2">
+                                <button 
+                                    onClick={() => spritePngInputRef.current?.click()}
+                                    className="px-3 py-1.5 bg-green-900/40 border border-green-700/80 rounded hover:bg-green-900/60 text-green-400 font-bold text-center flex items-center justify-center gap-1.5"
+                                    title="Import custom PNG/JPG file"
+                                >
+                                    <Plus size={12} />
+                                    Import
+                                </button>
+                                <button 
+                                    onClick={handleDeleteSprite}
+                                    className="px-3 py-1.5 bg-red-955/40 border border-red-800/80 rounded hover:bg-red-955/60 text-red-400 font-bold text-center flex items-center justify-center gap-1.5"
+                                    title="Delete active sprite from sheet"
+                                >
+                                    <Minus size={12} />
+                                    Delete
+                                </button>
+                            </div>
                             <button 
-                                onClick={() => spritePngInputRef.current?.click()}
-                                className="px-3 py-1.5 bg-green-900/40 border border-green-700/80 rounded hover:bg-green-900/60 text-green-400 font-bold text-center flex items-center justify-center gap-1.5"
-                                title="Import custom PNG/JPG file"
+                                onClick={handleDuplicateSprite}
+                                className="px-3 py-1.5 bg-blue-900/40 border border-blue-700/80 rounded hover:bg-blue-900/60 text-blue-400 font-bold text-center flex items-center justify-center gap-1.5"
+                                title="Duplicate active sprite (Index + 1)"
                             >
-                                <Plus size={12} />
-                                Import Sprite
-                            </button>
-                            <button 
-                                onClick={handleDeleteSprite}
-                                className="px-3 py-1.5 bg-red-955/40 border border-red-800/80 rounded hover:bg-red-955/60 text-red-400 font-bold text-center flex items-center justify-center gap-1.5"
-                                title="Delete active sprite from sheet"
-                            >
-                                <Minus size={12} />
-                                Delete Sprite
+                                <Copy size={12} />
+                                Duplicate Sprite
                             </button>
                             <input 
                                 type="file" 
@@ -1632,19 +1688,99 @@ export default function MugenStudio() {
                                     </button>
                                 </div>
 
-                                <div className="max-h-24 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 text-[10px] mt-1 flex flex-col gap-1 font-mono">
+                                <div className="max-h-48 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 text-[10px] mt-1 flex flex-col gap-2 font-mono">
                                     {/* Defensive Box rows */}
                                     {airData.actions[selectedActionId].clsn2.map((box, idx) => (
-                                        <div key={`c2-${idx}`} className="flex items-center justify-between bg-blue-950/20 px-1 py-0.5 rounded border border-blue-900/20">
-                                            <span className="text-blue-400">🛡️ Clsn2[{idx}]: {box.x1},{box.y1}</span>
-                                            <button onClick={() => handleDeleteCollisionBox(2, box.id)} className="text-red-500 hover:text-red-400">x</button>
+                                        <div key={`c2-${idx}`} className="flex flex-col bg-blue-950/20 p-1.5 rounded border border-blue-900/30 gap-1.5">
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-blue-400 font-bold">🛡️ Defensive Box #{idx}</span>
+                                                <button onClick={() => handleDeleteCollisionBox(2, box.id)} className="text-red-500 hover:text-red-400 font-bold bg-[#222] px-1.5 rounded">DELETE</button>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-1.5">
+                                                <div className="flex flex-col gap-0.5">
+                                                    <span className="text-[8px] text-gray-500">X1 (Left)</span>
+                                                    <input 
+                                                        type="number" 
+                                                        className="w-full bg-black border border-[#333] text-blue-400 px-1 py-0.5 text-[9px] rounded"
+                                                        value={box.x1}
+                                                        onChange={e => handleUpdateCollisionBox(2, box.id, 'x1', parseInt(e.target.value) || 0)}
+                                                    />
+                                                </div>
+                                                <div className="flex flex-col gap-0.5">
+                                                    <span className="text-[8px] text-gray-500">Y1 (Top)</span>
+                                                    <input 
+                                                        type="number" 
+                                                        className="w-full bg-black border border-[#333] text-blue-400 px-1 py-0.5 text-[9px] rounded"
+                                                        value={box.y1}
+                                                        onChange={e => handleUpdateCollisionBox(2, box.id, 'y1', parseInt(e.target.value) || 0)}
+                                                    />
+                                                </div>
+                                                <div className="flex flex-col gap-0.5">
+                                                    <span className="text-[8px] text-gray-500">X2 (Right)</span>
+                                                    <input 
+                                                        type="number" 
+                                                        className="w-full bg-black border border-[#333] text-blue-400 px-1 py-0.5 text-[9px] rounded"
+                                                        value={box.x2}
+                                                        onChange={e => handleUpdateCollisionBox(2, box.id, 'x2', parseInt(e.target.value) || 0)}
+                                                    />
+                                                </div>
+                                                <div className="flex flex-col gap-0.5">
+                                                    <span className="text-[8px] text-gray-500">Y2 (Bottom)</span>
+                                                    <input 
+                                                        type="number" 
+                                                        className="w-full bg-black border border-[#333] text-blue-400 px-1 py-0.5 text-[9px] rounded"
+                                                        value={box.y2}
+                                                        onChange={e => handleUpdateCollisionBox(2, box.id, 'y2', parseInt(e.target.value) || 0)}
+                                                    />
+                                                </div>
+                                            </div>
                                         </div>
                                     ))}
                                     {/* Attack Box rows */}
                                     {airData.actions[selectedActionId].clsn1.map((box, idx) => (
-                                        <div key={`c1-${idx}`} className="flex items-center justify-between bg-red-955/10 px-1 py-0.5 rounded border border-red-900/20">
-                                            <span className="text-red-400">⚔️ Clsn1[{idx}]: {box.x1},{box.y1}</span>
-                                            <button onClick={() => handleDeleteCollisionBox(1, box.id)} className="text-red-500 hover:text-red-400">x</button>
+                                        <div key={`c1-${idx}`} className="flex flex-col bg-red-955/10 p-1.5 rounded border border-red-900/30 gap-1.5">
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-red-400 font-bold">⚔️ Attack Box #{idx}</span>
+                                                <button onClick={() => handleDeleteCollisionBox(1, box.id)} className="text-red-500 hover:text-red-400 font-bold bg-[#222] px-1.5 rounded">DELETE</button>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-1.5">
+                                                <div className="flex flex-col gap-0.5">
+                                                    <span className="text-[8px] text-gray-500">X1 (Left)</span>
+                                                    <input 
+                                                        type="number" 
+                                                        className="w-full bg-black border border-[#333] text-red-400 px-1 py-0.5 text-[9px] rounded"
+                                                        value={box.x1}
+                                                        onChange={e => handleUpdateCollisionBox(1, box.id, 'x1', parseInt(e.target.value) || 0)}
+                                                    />
+                                                </div>
+                                                <div className="flex flex-col gap-0.5">
+                                                    <span className="text-[8px] text-gray-500">Y1 (Top)</span>
+                                                    <input 
+                                                        type="number" 
+                                                        className="w-full bg-black border border-[#333] text-red-400 px-1 py-0.5 text-[9px] rounded"
+                                                        value={box.y1}
+                                                        onChange={e => handleUpdateCollisionBox(1, box.id, 'y1', parseInt(e.target.value) || 0)}
+                                                    />
+                                                </div>
+                                                <div className="flex flex-col gap-0.5">
+                                                    <span className="text-[8px] text-gray-500">X2 (Right)</span>
+                                                    <input 
+                                                        type="number" 
+                                                        className="w-full bg-black border border-[#333] text-red-400 px-1 py-0.5 text-[9px] rounded"
+                                                        value={box.x2}
+                                                        onChange={e => handleUpdateCollisionBox(1, box.id, 'x2', parseInt(e.target.value) || 0)}
+                                                    />
+                                                </div>
+                                                <div className="flex flex-col gap-0.5">
+                                                    <span className="text-[8px] text-gray-500">Y2 (Bottom)</span>
+                                                    <input 
+                                                        type="number" 
+                                                        className="w-full bg-black border border-[#333] text-red-400 px-1 py-0.5 text-[9px] rounded"
+                                                        value={box.y2}
+                                                        onChange={e => handleUpdateCollisionBox(1, box.id, 'y2', parseInt(e.target.value) || 0)}
+                                                    />
+                                                </div>
+                                            </div>
                                         </div>
                                     ))}
                                     {airData.actions[selectedActionId].clsn1.length === 0 && airData.actions[selectedActionId].clsn2.length === 0 && (
@@ -1796,8 +1932,8 @@ export default function MugenStudio() {
             </div>
          </div>
 
-         {/* Vertical Toolbar for Sprites */}
-         {activeMode === 'Sprites' && (
+         {/* Vertical Toolbar for Sprites & Animations */}
+         {(activeMode === 'Sprites' || activeMode === 'Animations') && (
              <div className={`w-10 bg-[#252525] border-r border-[#111] flex-col items-center py-2 gap-2 shadow-[2px_0_5px_rgba(0,0,0,0.5)] z-20 overflow-y-auto shrink-0 ${mobileTab === 'center' ? 'flex' : 'hidden md:flex'}`}>
                  <button 
                      onClick={() => setActiveTool('pan')} 
@@ -1809,38 +1945,51 @@ export default function MugenStudio() {
                  <button 
                      onClick={() => setActiveTool('move')} 
                      className={`p-1.5 rounded ${activeTool === 'move' ? 'bg-[#444] shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
-                     title="Pivot Align Edit"
+                     title={activeMode === 'Sprites' ? "Pivot Align Edit" : "Offset Align Edit"}
                  >
                      <Crosshair size={16} />
                  </button>
-                 <button 
-                     onClick={() => setActiveTool('paint')} 
-                     className={`p-1.5 rounded ${activeTool === 'paint' ? 'bg-[#444] shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
-                     title="Pixel Draw"
-                 >
-                     <Pen size={16} />
-                 </button>
-                 <button 
-                     onClick={() => setActiveTool('bucket')} 
-                     className={`p-1.5 rounded ${activeTool === 'bucket' ? 'bg-[#444] shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
-                     title="Bucket Fill (Connected Pixels)"
-                 >
-                     <PaintBucket size={16} />
-                 </button>
-                 <button 
-                     onClick={() => setActiveTool('wand')} 
-                     className={`p-1.5 rounded ${activeTool === 'wand' ? 'bg-[#444] shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
-                     title="Magic Wand (Recolor All)"
-                 >
-                     <Wand2 size={16} />
-                 </button>
-                 <button 
-                     onClick={() => setActiveTool('eraser')} 
-                     className={`p-1.5 rounded ${activeTool === 'eraser' ? 'bg-[#444] shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
-                     title="Erase (Draw Index 0)"
-                 >
-                     <div className="w-4 h-4 rounded-sm outline outline-1 outline-current flex items-center justify-center opacity-80" style={{ backgroundImage: 'linear-gradient(45deg, #ccc 25%, transparent 25%), linear-gradient(-45deg, #ccc 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #ccc 75%), linear-gradient(-45deg, transparent 75%, #ccc 75%)', backgroundSize: '4px 4px', backgroundPosition: '0 0, 0 2px, 2px -2px, -2px 0px' }} />
-                 </button>
+                 {activeMode === 'Sprites' && (
+                     <>
+                        <button 
+                            onClick={() => setActiveTool('paint')} 
+                            className={`p-1.5 rounded ${activeTool === 'paint' ? 'bg-[#444] shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
+                            title="Pixel Draw"
+                        >
+                            <Pen size={16} />
+                        </button>
+                        <button 
+                            onClick={() => setActiveTool('bucket')} 
+                            className={`p-1.5 rounded ${activeTool === 'bucket' ? 'bg-[#444] shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
+                            title="Bucket Fill (Connected Pixels)"
+                        >
+                            <PaintBucket size={16} />
+                        </button>
+                        <button 
+                            onClick={() => setActiveTool('wand')} 
+                            className={`p-1.5 rounded ${activeTool === 'wand' ? 'bg-[#444] shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
+                            title="Magic Wand (Recolor All)"
+                        >
+                            <Wand2 size={16} />
+                        </button>
+                        <button 
+                            onClick={() => setActiveTool('eraser')} 
+                            className={`p-1.5 rounded ${activeTool === 'eraser' ? 'bg-[#444] shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
+                            title="Erase (Draw Index 0)"
+                        >
+                            <div className="w-4 h-4 rounded-sm outline outline-1 outline-current flex items-center justify-center opacity-80" style={{ backgroundImage: 'linear-gradient(45deg, #ccc 25%, transparent 25%), linear-gradient(-45deg, #ccc 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #ccc 75%), linear-gradient(-45deg, transparent 75%, #ccc 75%)', backgroundSize: '4px 4px', backgroundPosition: '0 0, 0 2px, 2px -2px, -2px 0px' }} />
+                        </button>
+                     </>
+                 )}
+                 {activeMode === 'Animations' && (
+                     <button 
+                        onClick={() => setActiveTool('clsn_edit')} 
+                        className={`p-1.5 rounded ${activeTool === 'clsn_edit' ? 'bg-[#444] shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
+                        title="CLSN Visual Edit"
+                    >
+                        <Square size={16} />
+                    </button>
+                 )}
              </div>
          )}
 
@@ -2092,6 +2241,10 @@ export default function MugenStudio() {
                                 showAxis={showAxis}
                                 pan={pan}
                                 previewOffset={previewOffset}
+                                activeTool={activeTool}
+                                selectedClsn={selectedClsn}
+                                setSelectedClsn={setSelectedClsn}
+                                onUpdateBox={handleUpdateCollisionBox}
                             />
                         )
                     ) : ( 
@@ -2585,8 +2738,23 @@ function getCachedSpriteCanvas(sprite: any, palette: Uint8Array): HTMLCanvasElem
   return cachedCanvas;
 }
 
-function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis, pan, previewOffset }: { sff: SffData, act: Uint8Array | null, action: any | null, frameIndex: number, zoom: number, showClsn: boolean, showAxis: boolean, pan?: {x: number, y: number}, previewOffset?: {x: number, y: number} | null }) {
+function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis, pan, previewOffset, activeTool, selectedClsn, setSelectedClsn, onUpdateBox }: { 
+    sff: SffData, 
+    act: Uint8Array | null, 
+    action: any | null, 
+    frameIndex: number, 
+    zoom: number, 
+    showClsn: boolean, 
+    showAxis: boolean, 
+    pan?: {x: number, y: number}, 
+    previewOffset?: {x: number, y: number} | null,
+    activeTool: string,
+    selectedClsn: { type: 1 | 2; id: number } | null,
+    setSelectedClsn: (val: { type: 1 | 2; id: number } | null) => void,
+    onUpdateBox: (type: 1 | 2, id: number, field: string, value: number) => void
+}) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const [dragState, setDragState] = useState<{ type: 'move' | 'nw' | 'ne' | 'sw' | 'se'; boxId: number; clsnType: 1|2; startX: number; startY: number; initialBox: any } | null>(null);
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -2629,32 +2797,67 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
                             const elXOff = previewOffset ? previewOffset.x : element.xOffset;
                             const elYOff = previewOffset ? previewOffset.y : element.yOffset;
                             
-                            const renderX = centerX + (elXOff - sprite.xOffset) * zoom + panX;
-                            const renderY = centerY + (elYOff - sprite.yOffset) * zoom + panY;
+                            const flip = (element.flip || "").toUpperCase();
+                            const flipH = flip.includes('H');
+                            const flipV = flip.includes('V');
+
+                            ctx.save();
+                            ctx.translate(centerX + panX, centerY + panY);
+                            if (flipH) ctx.scale(-1, 1);
+                            if (flipV) ctx.scale(1, -1);
+
+                            const drawX = (elXOff - sprite.xOffset) * zoom;
+                            const drawY = (elYOff - sprite.yOffset) * zoom;
+                            
                             ctx.imageSmoothingEnabled = false;
-                            ctx.drawImage(offscreen, renderX, renderY, sprite.width * zoom, sprite.height * zoom);
+                            ctx.drawImage(offscreen, drawX, drawY, sprite.width * zoom, sprite.height * zoom);
+                            ctx.restore();
                         } catch(e) {}
                     }
                 }
 
                 if (showClsn) {
-                    action.clsn2.forEach((box: any) => {
-                        ctx.strokeStyle = 'rgba(0, 100, 255, 0.8)';
-                        ctx.fillStyle = 'rgba(0, 100, 255, 0.2)';
-                        const bX = centerX + box.x1 * zoom + panX;
-                        const bY = centerY + box.y1 * zoom + panY;
-                        ctx.fillRect(bX, bY, (box.x2 - box.x1) * zoom, (box.y2 - box.y1) * zoom);
-                        ctx.strokeRect(bX, bY, (box.x2 - box.x1) * zoom, (box.y2 - box.y1) * zoom);
-                    });
-                    
-                    action.clsn1.forEach((box: any) => {
-                        ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
-                        ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
-                        const bX = centerX + box.x1 * zoom + panX;
-                        const bY = centerY + box.y1 * zoom + panY;
-                        ctx.fillRect(bX, bY, (box.x2 - box.x1) * zoom, (box.y2 - box.y1) * zoom);
-                        ctx.strokeRect(bX, bY, (box.x2 - box.x1) * zoom, (box.y2 - box.y1) * zoom);
-                    });
+                    const flip = (element.flip || "").toUpperCase();
+                    const flipH = flip.includes('H');
+                    const flipV = flip.includes('V');
+
+                    ctx.save();
+                    ctx.translate(centerX + panX, centerY + panY);
+                    if (flipH) ctx.scale(-1, 1);
+                    if (flipV) ctx.scale(1, -1);
+
+                    const drawBox = (box: any, type: 1 | 2) => {
+                        const isSelected = selectedClsn?.type === type && selectedClsn?.id === box.id;
+                        ctx.strokeStyle = type === 1 ? 'rgba(255, 0, 0, 0.8)' : 'rgba(0, 100, 255, 0.8)';
+                        ctx.fillStyle = type === 1 ? 'rgba(255, 0, 0, 0.2)' : 'rgba(0, 100, 255, 0.2)';
+                        if (isSelected) {
+                            ctx.lineWidth = 2;
+                            ctx.strokeStyle = type === 1 ? '#ff5555' : '#55aaff';
+                        } else {
+                            ctx.lineWidth = 1;
+                        }
+
+                        const bX = box.x1 * zoom;
+                        const bY = box.y1 * zoom;
+                        const bW = (box.x2 - box.x1) * zoom;
+                        const bH = (box.y2 - box.y1) * zoom;
+                        
+                        ctx.fillRect(bX, bY, bW, bH);
+                        ctx.strokeRect(bX, bY, bW, bH);
+
+                        if (isSelected && activeTool === 'clsn_edit') {
+                            const hS = 4;
+                            ctx.fillStyle = '#fff';
+                            ctx.fillRect(bX - hS, bY - hS, hS*2, hS*2);
+                            ctx.fillRect(bX + bW - hS, bY - hS, hS*2, hS*2);
+                            ctx.fillRect(bX - hS, bY + bH - hS, hS*2, hS*2);
+                            ctx.fillRect(bX + bW - hS, bY + bH - hS, hS*2, hS*2);
+                        }
+                    };
+
+                    action.clsn2.forEach((box: any) => drawBox(box, 2));
+                    action.clsn1.forEach((box: any) => drawBox(box, 1));
+                    ctx.restore();
                 }
             }
         };
@@ -2664,9 +2867,143 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
         const handleResize = () => { resize(); render(); };
         window.addEventListener('resize', handleResize);
         return () => window.removeEventListener('resize', handleResize);
-    }, [sff, act, action, frameIndex, zoom, showClsn, showAxis, pan, previewOffset]);
+    }, [sff, act, action, frameIndex, zoom, showClsn, showAxis, pan, previewOffset, selectedClsn, activeTool]);
 
-    return <canvas ref={canvasRef} className="w-full h-full pointer-events-none" />;
+    const getWorkspaceCoords = (clientX: number, clientY: number) => {
+        if (!canvasRef.current || !action) return null;
+        const rect = canvasRef.current.getBoundingClientRect();
+        const mx = clientX - rect.left;
+        const my = clientY - rect.top;
+        
+        const centerX = canvasRef.current.width / 2;
+        const centerY = canvasRef.current.height * 0.7;
+        const panX = pan?.x || 0;
+        const panY = pan?.y || 0;
+
+        const element = action.elements[frameIndex];
+        const flip = (element?.flip || "").toUpperCase();
+        const flipH = flip.includes('H');
+        const flipV = flip.includes('V');
+
+        let wx = (mx - (centerX + panX));
+        let wy = (my - (centerY + panY));
+        if (flipH) wx = -wx;
+        if (flipV) wy = -wy;
+        return { wx: wx / zoom, wy: wy / zoom };
+    };
+
+    const startDrag = (clientX: number, clientY: number) => {
+        if (activeTool !== 'clsn_edit' || !action) return;
+        const coords = getWorkspaceCoords(clientX, clientY);
+        if (!coords) return;
+        const { wx, wy } = coords;
+
+        const handleSize = 12 / zoom;
+        const selectionPadding = 8 / zoom;
+        
+        const checkBoxes = (boxes: any[], type: 1 | 2) => {
+            for (let i = boxes.length - 1; i >= 0; i--) {
+                const box = boxes[i];
+                const isSelected = selectedClsn?.type === type && selectedClsn?.id === box.id;
+                
+                if (isSelected) {
+                    if (Math.abs(wx - box.x1) < handleSize && Math.abs(wy - box.y1) < handleSize) return { type: 'nw' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
+                    if (Math.abs(wx - box.x2) < handleSize && Math.abs(wy - box.y1) < handleSize) return { type: 'ne' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
+                    if (Math.abs(wx - box.x1) < handleSize && Math.abs(wy - box.y2) < handleSize) return { type: 'sw' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
+                    if (Math.abs(wx - box.x2) < handleSize && Math.abs(wy - box.y2) < handleSize) return { type: 'se' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
+                }
+                
+                const minX = Math.min(box.x1, box.x2) - selectionPadding;
+                const maxX = Math.max(box.x1, box.x2) + selectionPadding;
+                const minY = Math.min(box.y1, box.y2) - selectionPadding;
+                const maxY = Math.max(box.y1, box.y2) + selectionPadding;
+
+                if (wx >= minX && wx <= maxX && wy >= minY && wy <= maxY) {
+                    return { type: 'move' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
+                }
+            }
+            return null;
+        };
+
+        const result = checkBoxes(action.clsn1, 1) || checkBoxes(action.clsn2, 2);
+        
+        if (result) {
+            setSelectedClsn({ type: result.clsnType, id: result.boxId });
+            setDragState({ ...result, startX: wx, startY: wy });
+        } else {
+            setSelectedClsn(null);
+        }
+    };
+
+    const doDrag = (clientX: number, clientY: number) => {
+        if (!dragState || !action) return;
+        const coords = getWorkspaceCoords(clientX, clientY);
+        if (!coords) return;
+        const { wx, wy } = coords;
+
+        const dx = Math.round(wx - dragState.startX);
+        const dy = Math.round(wy - dragState.startY);
+        const b = dragState.initialBox;
+
+        if (dragState.type === 'move') {
+            onUpdateBox(dragState.clsnType, dragState.boxId, 'x1', b.x1 + dx);
+            onUpdateBox(dragState.clsnType, dragState.boxId, 'y1', b.y1 + dy);
+            onUpdateBox(dragState.clsnType, dragState.boxId, 'x2', b.x2 + dx);
+            onUpdateBox(dragState.clsnType, dragState.boxId, 'y2', b.y2 + dy);
+        } else if (dragState.type === 'nw') {
+            onUpdateBox(dragState.clsnType, dragState.boxId, 'x1', b.x1 + dx);
+            onUpdateBox(dragState.clsnType, dragState.boxId, 'y1', b.y1 + dy);
+        } else if (dragState.type === 'ne') {
+            onUpdateBox(dragState.clsnType, dragState.boxId, 'x2', b.x2 + dx);
+            onUpdateBox(dragState.clsnType, dragState.boxId, 'y1', b.y1 + dy);
+        } else if (dragState.type === 'sw') {
+            onUpdateBox(dragState.clsnType, dragState.boxId, 'x1', b.x1 + dx);
+            onUpdateBox(dragState.clsnType, dragState.boxId, 'y2', b.y2 + dy);
+        } else if (dragState.type === 'se') {
+            onUpdateBox(dragState.clsnType, dragState.boxId, 'x2', b.x2 + dx);
+            onUpdateBox(dragState.clsnType, dragState.boxId, 'y2', b.y2 + dy);
+        }
+    };
+
+    const handleMouseDown = (e: React.MouseEvent) => {
+        if (activeTool === 'clsn_edit') {
+            e.stopPropagation();
+            startDrag(e.clientX, e.clientY);
+        }
+    };
+    const handleMouseMove = (e: React.MouseEvent) => {
+        if (dragState) {
+            e.stopPropagation();
+            doDrag(e.clientX, e.clientY);
+        }
+    };
+    const handleTouchStart = (e: React.TouchEvent) => {
+        if (activeTool === 'clsn_edit') {
+            e.stopPropagation();
+            e.preventDefault();
+            startDrag(e.touches[0].clientX, e.touches[0].clientY);
+        }
+    };
+    const handleTouchMove = (e: React.TouchEvent) => {
+        if (dragState) {
+            e.stopPropagation();
+            e.preventDefault();
+            doDrag(e.touches[0].clientX, e.touches[0].clientY);
+        }
+    };
+
+    return (
+        <div className="w-full h-full relative overflow-hidden touch-none" 
+             onMouseDown={handleMouseDown}
+             onMouseMove={handleMouseMove}
+             onMouseUp={() => setDragState(null)}
+             onMouseLeave={() => setDragState(null)}
+             onTouchStart={handleTouchStart}
+             onTouchMove={handleTouchMove}
+             onTouchEnd={() => setDragState(null)}>
+            <canvas ref={canvasRef} className="w-full h-full pointer-events-none" />
+        </div>
+    );
 }
 
 function PaletteRenderer({ act, selectedColorIdx, onColorClick }: { act: Uint8Array | null | undefined, selectedColorIdx?: number | null, onColorClick?: (index: number) => void }) {

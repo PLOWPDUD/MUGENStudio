@@ -1216,7 +1216,7 @@ export default function MugenStudio() {
       <div className="flex items-center px-1 bg-[#1a1a1a] border-b border-[#3a3a3a] overflow-x-auto whitespace-nowrap shrink-0 max-w-[100vw] custom-scrollbar">
          <div className="px-2 py-1 cursor-default opacity-80 flex items-center gap-1 shrink-0">
              <div className="w-3 h-3 bg-blue-500 rounded-full" />
-             MugenStudio
+             MUGENStudio
          </div>
          {menuItems.map(item => (
             <div 

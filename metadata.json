@@ -1,6 +1,6 @@
 {
-  "name": "MUGEN Mobile Studio",
+  "name": "MUGENStudio",
   "description": "Mobile-optimized MUGEN Character Creator/Editor natively supporting SFF/AIR/ACT formats without emulator overhead.",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

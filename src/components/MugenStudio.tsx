@@ -3,7 +3,7 @@ import { motion } from 'motion/react';
 import { 
   File as FileIcon, FolderOpen, Save, Undo, Redo, Scissors, Copy, Clipboard,
   Search, ArrowLeftRight, ZoomIn, ZoomOut, Plus, Minus, Play, Pause, AlertCircle, HelpCircle, FileText as FileTextIcon, Image as ImageIcon, PlayCircle, Settings, Trash2, Pen, Move, Hand, PaintBucket, Wand2, Crosshair,
-  Volume2, Music, Download, PlusCircle, Square, Eraser, Palette, Zap, Box
+  Volume2, Music, Download, PlusCircle, Square, Eraser, Palette, Zap, Box, Upload
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { parseIniString, stringifyIni } from '../lib/mugen/defParser';
@@ -92,8 +92,20 @@ export default function MugenStudio({
   
   // Data State
   const [iniData, setIniData] = useState<Record<string, Record<string, string>> | null>(null);
-  const [cnsData, setCnsData] = useState<Record<string, Record<string, string>> | null>(null);
-  const [cmdData, setCmdData] = useState<Record<string, Record<string, string>> | null>(null);
+  
+  interface ManagedTextFile {
+    id: string;
+    filename: string;
+    content: string;
+    parsed?: Record<string, Record<string, string>> | null;
+  }
+
+  const [cmdFiles, setCmdFiles] = useState<ManagedTextFile[]>([{ id: 'default', filename: 'player.cmd', content: templateCmd, parsed: parseIniString(templateCmd) }]);
+  const [activeCmdFileId, setActiveCmdFileId] = useState('default');
+
+  const [stFiles, setStFiles] = useState<ManagedTextFile[]>([{ id: 'default', filename: 'player.cns', content: templateCns, parsed: parseIniString(templateCns) }]);
+  const [activeStFileId, setActiveStFileId] = useState('default');
+
   const [sffData, setSffData] = useState<SffData | null>(null);
   const [actPalette, setActPalette] = useState<Uint8Array | null>(null);
   const [airData, setAirData] = useState<AirData | null>(null);
@@ -200,8 +212,6 @@ export default function MugenStudio({
     pushToHistory(nextSff);
   };
   const [iniRawText, setIniRawText] = useState<string | null>(null);
-  const [cnsRawText, setCnsRawText] = useState<string | null>(null);
-  const [cmdRawText, setCmdRawText] = useState<string | null>(null);
   const [airRawText, setAirRawText] = useState<string | null>(null);
 
   const undo = () => {
@@ -310,10 +320,10 @@ export default function MugenStudio({
     // Populate with template files
     setIniRawText(templateDef);
     setIniData(parseIniString(templateDef));
-    setCnsRawText(templateCns);
-    setCnsData(parseIniString(templateCns));
-    setCmdRawText(templateCmd);
-    setCmdData(parseIniString(templateCmd));
+    setStFiles([{ id: 'default', filename: 'player.cns', content: templateCns, parsed: parseIniString(templateCns) }]);
+    setActiveStFileId('default');
+    setCmdFiles([{ id: 'default', filename: 'player.cmd', content: templateCmd, parsed: parseIniString(templateCmd) }]);
+    setActiveCmdFileId('default');
     setAirRawText(templateAir);
     
     try {
@@ -493,21 +503,25 @@ export default function MugenStudio({
     if (!window.confirm("Are you sure you want to delete this palette?")) return;
     
     const nextPalettes = sffData.palettes.filter((_, i) => i !== idx);
-    setSffData({
+    const nextSff = {
         ...sffData,
         palettes: nextPalettes
-    });
+    };
+    setSffData(nextSff);
     setSelectedPaletteIdx(Math.max(0, Math.min(nextPalettes.length - 1, selectedPaletteIdx)));
+    pushToHistory(nextSff);
   };
 
   const handleUpdatePaletteMeta = (idx: number, key: 'group' | 'item', value: number) => {
     if (!sffData || !sffData.palettes) return;
     const nextPalettes = [...sffData.palettes];
     nextPalettes[idx] = { ...nextPalettes[idx], [key]: value };
-    setSffData({
+    const nextSff = {
         ...sffData,
         palettes: nextPalettes
-    });
+    };
+    setSffData(nextSff);
+    pushToHistory(nextSff);
   };
 
   const handleImportSpriteFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -655,7 +669,7 @@ export default function MugenStudio({
         const currentSprite = prevSff.images[selectedSpriteIdx];
         if (!currentSprite) return prevSff;
         
-        const nextSff = { ...prevSff };
+        const nextSff = { ...prevSff, images: [...prevSff.images] };
         const nextSprite = { ...currentSprite };
         const nextIndices = new Uint8Array(currentSprite.pixelIndices);
         let changed = false;
@@ -948,9 +962,6 @@ export default function MugenStudio({
     const filesArray = Array.from(files) as File[];
     const hasActInSelection = filesArray.some(f => f.name.toLowerCase().endsWith('.act'));
 
-    let initialCns = null;
-    let initialCmd = null;
-
     for (let i = 0; i < files.length; i++) {
         const file = files[i];
         const ext = file.name.split('.').pop()?.toLowerCase();
@@ -962,12 +973,26 @@ export default function MugenStudio({
                 setIniRawText(text);
             } else if (ext === 'cns' || ext === 'st') {
                 const text = await file.text();
-                setCnsData(parseIniString(text));
-                setCnsRawText(text);
+                const fileId = `file-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+                setStFiles(prev => {
+                  const existing = prev.find(f => f.filename === file.name);
+                  if (existing) {
+                    return prev.map(f => f.filename === file.name ? { ...f, content: text, parsed: parseIniString(text) } : f);
+                  }
+                  return [...prev, { id: fileId, filename: file.name, content: text, parsed: parseIniString(text) }];
+                });
+                setActiveStFileId(fileId);
             } else if (ext === 'cmd') {
                 const text = await file.text();
-                setCmdData(parseIniString(text));
-                setCmdRawText(text);
+                const fileId = `file-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+                setCmdFiles(prev => {
+                  const existing = prev.find(f => f.filename === file.name);
+                  if (existing) {
+                    return prev.map(f => f.filename === file.name ? { ...f, content: text, parsed: parseIniString(text) } : f);
+                  }
+                  return [...prev, { id: fileId, filename: file.name, content: text, parsed: parseIniString(text) }];
+                });
+                setActiveCmdFileId(fileId);
             } else if (ext === 'sff') {
                 const buffer = await file.arrayBuffer();
                 const parsed = parseSffBinary(buffer);
@@ -1048,9 +1073,27 @@ export default function MugenStudio({
 
   const getActiveTextData = () => {
       if (activeMode === 'Definitions') return { text: iniRawText, setter: setIniRawText, parsed: iniData };
-      if (activeMode === 'States') return { text: cnsRawText, setter: setCnsRawText, parsed: cnsData };
-      if (activeMode === 'Commands') return { text: cmdRawText, setter: setCmdRawText, parsed: cmdData };
-      return { text: null, setter: null, parsed: null };
+      if (activeMode === 'States') {
+        const file = stFiles.find(f => f.id === activeStFileId) || stFiles[0];
+        return { 
+          text: file.content, 
+          setter: (val: string | null) => {
+            setStFiles(prev => prev.map(f => f.id === activeStFileId ? { ...f, content: val || '' } : f));
+          }, 
+          parsed: file.parsed 
+        };
+      }
+      if (activeMode === 'Commands') {
+        const file = cmdFiles.find(f => f.id === activeCmdFileId) || cmdFiles[0];
+        return { 
+          text: file.content, 
+          setter: (val: string | null) => {
+            setCmdFiles(prev => prev.map(f => f.id === activeCmdFileId ? { ...f, content: val || '' } : f));
+          }, 
+          parsed: file.parsed 
+        };
+      }
+      return { text: null, setter: () => {}, parsed: null };
   };
 
   const { text: activeText, setter: setActiveText, parsed: activeParsedData } = getActiveTextData();
@@ -1059,15 +1102,29 @@ export default function MugenStudio({
   useEffect(() => {
     try {
         if (activeMode === 'Definitions' && iniRawText) setIniData(parseIniString(iniRawText));
-        if (activeMode === 'States' && cnsRawText) setCnsData(parseIniString(cnsRawText));
-        if (activeMode === 'Commands' && cmdRawText) setCmdData(parseIniString(cmdRawText));
+        if (activeMode === 'States') {
+          setStFiles(prev => prev.map(f => {
+            if (f.id === activeStFileId) {
+              return { ...f, parsed: parseIniString(f.content) };
+            }
+            return f;
+          }));
+        }
+        if (activeMode === 'Commands') {
+          setCmdFiles(prev => prev.map(f => {
+            if (f.id === activeCmdFileId) {
+              return { ...f, parsed: parseIniString(f.content) };
+            }
+            return f;
+          }));
+        }
     } catch(e) {}
-  }, [iniRawText, cnsRawText, cmdRawText, activeMode]);
+  }, [iniRawText, stFiles.find(f=>f.id===activeStFileId)?.content, cmdFiles.find(f=>f.id===activeCmdFileId)?.content, activeMode]);
 
   const handleUpdateSprite = (key: string, value: number) => {
     setSffData(prev => {
         if (!prev || selectedSpriteIdx === null) return prev;
-        const newSff = { ...prev };
+        const newSff = { ...prev, images: [...prev.images] };
         newSff.images[selectedSpriteIdx] = { ...newSff.images[selectedSpriteIdx], [key]: value };
         sffDataRef.current = newSff;
         return newSff;
@@ -1308,10 +1365,11 @@ export default function MugenStudio({
     if (actPalette) {
       setActPalette(nextPal);
     } else if (sffData && selectedSpriteIdx !== null) {
-      const nextSff = { ...sffData };
+      const nextSff = { ...sffData, images: [...sffData.images] };
       if (nextSff.images[selectedSpriteIdx]) {
-        nextSff.images[selectedSpriteIdx].palette = nextPal;
+        nextSff.images[selectedSpriteIdx] = { ...nextSff.images[selectedSpriteIdx], palette: nextPal };
         setSffData(nextSff);
+        sffDataRef.current = nextSff;
       }
     }
   };
@@ -1338,10 +1396,11 @@ export default function MugenStudio({
     if (actPalette) {
       setActPalette(nextPal);
     } else if (sffData && selectedSpriteIdx !== null) {
-      const nextSff = { ...sffData };
+      const nextSff = { ...sffData, images: [...sffData.images] };
       if (nextSff.images[selectedSpriteIdx]) {
-        nextSff.images[selectedSpriteIdx].palette = nextPal;
+        nextSff.images[selectedSpriteIdx] = { ...nextSff.images[selectedSpriteIdx], palette: nextPal };
         setSffData(nextSff);
+        sffDataRef.current = nextSff;
       }
     }
   };
@@ -1464,9 +1523,21 @@ export default function MugenStudio({
 
   const handleCreateNew = () => {
     if (activeMode === 'Definitions') setIniRawText(templateDef);
-    if (activeMode === 'States') setCnsRawText(templateCns);
-    if (activeMode === 'Commands') setCmdRawText(templateCmd);
+    if (activeMode === 'States') {
+      const id = `file-${Date.now()}`;
+      setStFiles(prev => [...prev, { id, filename: `st${prev.length || ''}.cns`, content: templateCns, parsed: parseIniString(templateCns) }]);
+      setActiveStFileId(id);
+    }
+    if (activeMode === 'Commands') {
+      const id = `file-${Date.now()}`;
+      setCmdFiles(prev => [...prev, { id, filename: `new${prev.length || ''}.cmd`, content: templateCmd, parsed: parseIniString(templateCmd) }]);
+      setActiveCmdFileId(id);
+    }
     if (activeMode === 'Animations') setAirRawText(templateAir);
+  };
+
+  const handleImportMoreFiles = () => {
+    fileInputRef.current?.click();
   };
   
   const handleSave = () => {
@@ -1483,11 +1554,20 @@ export default function MugenStudio({
         alert("Failed to compile sound (SND) archive: " + err.message);
       }
     } else if (activeText && activeMode !== 'Sprites' && activeMode !== 'Animations') {
+      let filename = `file.${activeMode === 'Definitions' ? 'def' : activeMode === 'States' ? 'cns' : 'cmd'}`;
+      if (activeMode === 'States') {
+        const file = stFiles.find(f => f.id === activeStFileId);
+        if (file) filename = file.filename;
+      } else if (activeMode === 'Commands') {
+        const file = cmdFiles.find(f => f.id === activeCmdFileId);
+        if (file) filename = file.filename;
+      }
+
       const blob = new Blob([activeText], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `file.${activeMode === 'Definitions' ? 'def' : activeMode === 'States' ? 'cns' : 'cmd'}`;
+      a.download = filename;
       a.click();
     }
   };
@@ -1513,13 +1593,15 @@ export default function MugenStudio({
       const defContent = iniRawText || (iniData ? stringifyIni(iniData) : templateDef);
       zip.file(`${charNameClean}/${defFile}`, defContent);
 
-      // 2. Constants & States File (.cns)
-      const cnsContent = cnsRawText || (cnsData ? stringifyIni(cnsData) : templateCns);
-      zip.file(`${charNameClean}/${cnsFile}`, cnsContent);
+      // 2. Constants & States Files (.cns / .st)
+      stFiles.forEach(file => {
+        zip.file(`${charNameClean}/${file.filename}`, file.content);
+      });
 
-      // 3. Command Config (.cmd)
-      const cmdContent = cmdRawText || (cmdData ? stringifyIni(cmdData) : templateCmd);
-      zip.file(`${charNameClean}/${cmdFile}`, cmdContent);
+      // 3. Command Configs (.cmd)
+      cmdFiles.forEach(file => {
+        zip.file(`${charNameClean}/${file.filename}`, file.content);
+      });
 
       // 4. Animation Config (.air)
       const airContent = airRawText || (airData ? serializeAirData(airData) : templateAir);
@@ -1643,10 +1725,10 @@ export default function MugenStudio({
                       </button>
                       <button onClick={(e) => { e.stopPropagation(); setZoom(2); setPan({x:0, y:0}); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600">Reset View</button>
                       <div className="h-px bg-[#444] my-1" />
-                      <button onClick={(e) => { e.stopPropagation(); setShowAxis(!showAxis); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600 flex justify-between">
+                      <button onClick={(e) => { e.stopPropagation(); setShowAxis(prev => !prev); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600 flex justify-between">
                         <span>{showAxis ? 'Hide' : 'Show'} Axis</span><span className="text-gray-500 text-[10px]">A</span>
                       </button>
-                      <button onClick={(e) => { e.stopPropagation(); setShowClsn(!showClsn); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600 flex justify-between">
+                      <button onClick={(e) => { e.stopPropagation(); setShowClsn(prev => !prev); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600 flex justify-between">
                         <span>{showClsn ? 'Hide' : 'Show'} Hitboxes</span><span className="text-gray-500 text-[10px]">C</span>
                       </button>
                     </div>
@@ -2573,9 +2655,117 @@ export default function MugenStudio({
                   <div className="flex-1 bg-[#1e1e1e] flex flex-col font-mono text-[11px] overflow-hidden">
                       {activeText !== null ? (
                          <div className="flex flex-1 relative flex-col">
-                             <div className="bg-[#151515] text-[10px] text-gray-500 px-4 py-1.5 flex justify-between border-b border-[#2b2b2b]">
-                                  <span>Editing raw source file: {activeMode === 'Definitions' ? 'character.def' : activeMode === 'States' ? 'states.cns' : 'commands.cmd'}</span>
-                                  <span className="text-blue-500">Dual Sync Form Mode enabled</span>
+                             <div className="bg-[#151515] flex items-center border-b border-[#2b2b2b] shrink-0">
+                                  {activeMode === 'States' && (
+                                    <div className="flex flex-1 overflow-x-auto scrollbar-hide">
+                                      {stFiles.map(file => (
+                                        <div 
+                                          key={file.id}
+                                          onClick={() => setActiveStFileId(file.id)}
+                                          className={`px-3 py-2 border-r border-[#2b2b2b] cursor-pointer flex items-center gap-2 group transition-colors shrink-0 ${activeStFileId === file.id ? 'bg-[#1e1e1e] text-blue-400' : 'text-gray-400 hover:text-gray-300 hover:bg-[#222]'}`}
+                                        >
+                                          <FileTextIcon size={12} className={activeStFileId === file.id ? 'text-blue-500' : 'text-gray-500'} />
+                                          <input 
+                                            className="bg-transparent border-none outline-none max-w-[120px] truncate cursor-pointer focus:bg-[#333] px-1 rounded"
+                                            value={file.filename}
+                                            onChange={(e) => {
+                                              setStFiles(prev => prev.map(f => f.id === file.id ? { ...f, filename: e.target.value } : f));
+                                            }}
+                                            onClick={(e) => {
+                                              if (activeStFileId === file.id) e.stopPropagation();
+                                            }}
+                                          />
+                                          {stFiles.length > 1 && (
+                                            <Trash2 
+                                              size={10} 
+                                              className="opacity-0 group-hover:opacity-100 hover:text-red-500 ml-1 transition-opacity shrink-0" 
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                if (window.confirm(`Remove ${file.filename}?`)) {
+                                                  const next = stFiles.filter(f => f.id !== file.id);
+                                                  setStFiles(next);
+                                                  if (activeStFileId === file.id && next.length > 0) setActiveStFileId(next[0].id);
+                                                }
+                                              }}
+                                            />
+                                          )}
+                                        </div>
+                                      ))}
+                                      <button 
+                                        onClick={() => handleCreateNew()}
+                                        className="px-3 py-2 text-gray-500 hover:text-blue-400 border-r border-[#2b2b2b] transition-colors shrink-0"
+                                        title="Add New Empty State File"
+                                      >
+                                        <Plus size={14} />
+                                      </button>
+                                      <button 
+                                        onClick={() => handleImportMoreFiles()}
+                                        className="px-3 py-2 text-gray-500 hover:text-green-400 transition-colors shrink-0"
+                                        title="Import / Load Existing .CNS or .ST Files"
+                                      >
+                                        <Upload size={14} />
+                                      </button>
+                                    </div>
+                                  )}
+                                  {activeMode === 'Commands' && (
+                                    <div className="flex flex-1 overflow-x-auto scrollbar-hide">
+                                      {cmdFiles.map(file => (
+                                        <div 
+                                          key={file.id}
+                                          onClick={() => setActiveCmdFileId(file.id)}
+                                          className={`px-3 py-2 border-r border-[#2b2b2b] cursor-pointer flex items-center gap-2 group transition-colors shrink-0 ${activeCmdFileId === file.id ? 'bg-[#1e1e1e] text-blue-400' : 'text-gray-400 hover:text-gray-300 hover:bg-[#222]'}`}
+                                        >
+                                          <FileTextIcon size={12} className={activeCmdFileId === file.id ? 'text-blue-500' : 'text-gray-500'} />
+                                          <input 
+                                            className="bg-transparent border-none outline-none max-w-[120px] truncate cursor-pointer focus:bg-[#333] px-1 rounded"
+                                            value={file.filename}
+                                            onChange={(e) => {
+                                              setCmdFiles(prev => prev.map(f => f.id === file.id ? { ...f, filename: e.target.value } : f));
+                                            }}
+                                            onClick={(e) => {
+                                              if (activeCmdFileId === file.id) e.stopPropagation();
+                                            }}
+                                          />
+                                          {cmdFiles.length > 1 && (
+                                            <Trash2 
+                                              size={10} 
+                                              className="opacity-0 group-hover:opacity-100 hover:text-red-500 ml-1 transition-opacity shrink-0" 
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                if (window.confirm(`Remove ${file.filename}?`)) {
+                                                  const next = cmdFiles.filter(f => f.id !== file.id);
+                                                  setCmdFiles(next);
+                                                  if (activeCmdFileId === file.id && next.length > 0) setActiveCmdFileId(next[0].id);
+                                                }
+                                              }}
+                                            />
+                                          )}
+                                        </div>
+                                      ))}
+                                      <button 
+                                        onClick={() => handleCreateNew()}
+                                        className="px-3 py-2 text-gray-500 hover:text-blue-400 border-r border-[#2b2b2b] transition-colors shrink-0"
+                                        title="Add New Empty Command File"
+                                      >
+                                        <Plus size={14} />
+                                      </button>
+                                      <button 
+                                        onClick={() => handleImportMoreFiles()}
+                                        className="px-3 py-2 text-gray-500 hover:text-green-400 transition-colors shrink-0"
+                                        title="Import / Load Existing .CMD Files"
+                                      >
+                                        <Upload size={14} />
+                                      </button>
+                                    </div>
+                                  )}
+                                  {activeMode === 'Definitions' && (
+                                    <div className="px-4 py-2 border-r border-[#2b2b2b] bg-[#1e1e1e] text-zinc-300">
+                                      character.def
+                                    </div>
+                                  )}
+                                  <div className="ml-auto px-4 py-1.5 text-[10px] text-gray-500 font-sans hidden sm:block shrink-0">
+                                     <span className="text-blue-500">Dual Sync Form Mode</span>
+                                  </div>
                              </div>
                              <textarea 
                                  className="w-full flex-1 bg-[#1e1e1e] text-[#d4d4d4] font-mono p-4 outline-none resize-none border-none whitespace-pre-wrap leading-relaxed"
@@ -2740,15 +2930,8 @@ export default function MugenStudio({
                          <span>-300</span><span>-200</span><span>-100</span><span>0</span><span>100</span><span>200</span><span>300</span>
                     </div>
 
-                    {/* Tool panel right overlay */}
-                    <div className="absolute top-6 right-6 flex flex-col gap-1.5 z-10" onMouseDown={e => e.stopPropagation()} onMouseMove={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()} onTouchMove={e => e.stopPropagation()}>
-                        <button onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(10, z + 0.5)); }} title="Zoom In" className="w-7 h-7 bg-[#3a3a3a] border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded text-gray-300 shadow-lg cursor-pointer"><ZoomIn size={14} /></button>
-                        <button onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(0.25, z - 0.5)); }} title="Zoom Out" className="w-7 h-7 bg-[#3a3a3a] border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded text-gray-300 shadow-lg cursor-pointer"><ZoomOut size={14} /></button>
-                        <button onClick={(e) => { e.stopPropagation(); setShowAxis(a => !a); }} title="Toggle Axis Grid" className={`w-7 h-7 border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded shadow-lg cursor-pointer ${showAxis ? 'bg-blue-600 text-white' : 'bg-[#3a3a3a] text-gray-300'}`}><Plus size={14} /></button>
-                    </div>
-
                     {/* Overlay info tooltip */}
-                    <div className="absolute top-7 left-10 bg-[#151515]/95 border border-[#444] px-3 py-1.5 rounded shadow-lg text-[10px] text-gray-300 pointer-events-none flex flex-col gap-0.5 z-20">
+                    <div className="absolute top-7 left-10 bg-[#151515]/95 border border-[#444] px-3 py-1.5 rounded shadow-lg text-[10px] text-gray-300 pointer-events-none flex flex-col gap-0.5 z-50">
                         <span className="font-bold text-blue-400">
                             {activeMode === 'Sprites' && activeTool !== 'move' ? '🖌️ Interactive Pixel Drawing' : '💡 Interactive Canvas Pivot Calibration'}
                         </span>
@@ -3013,6 +3196,15 @@ export default function MugenStudio({
                         <div className="text-gray-500 italic">No sprites loaded in memory...</div>
                     )}
 
+                    {/* Tool panel right overlay - MOVED HERE TO BE ON TOP */}
+                    <div className="absolute top-6 right-6 flex flex-col gap-1.5 z-50" onMouseDown={e => e.stopPropagation()} onMouseMove={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()} onTouchMove={e => e.stopPropagation()}>
+                        <button onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(10, z + 0.5)); }} title="Zoom In" className="w-7 h-7 bg-[#3a3a3a] border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded text-gray-300 shadow-lg cursor-pointer"><ZoomIn size={14} /></button>
+                        <button onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(0.25, z - 0.5)); }} title="Zoom Out" className="w-7 h-7 bg-[#3a3a3a] border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded text-gray-300 shadow-lg cursor-pointer"><ZoomOut size={14} /></button>
+                        <button onClick={(e) => { e.stopPropagation(); setShowAxis(a => !a); }} title="Toggle Axis Grid" className={`w-7 h-7 border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded shadow-lg cursor-pointer ${showAxis ? 'bg-blue-600 text-white' : 'bg-[#3a3a3a] text-gray-300'}`}><Plus size={14} /></button>
+                    </div>
+                </div>
+            )}
+
                     {activeMode === 'Animations' && (
                         (() => {
                             const action = selectedActionId !== null && airData ? airData.actions[selectedActionId] : null;
@@ -3157,8 +3349,6 @@ export default function MugenStudio({
                             );
                         })()
                     )}
-                </div>
-             )}
          </div>
 
          {/* Right Panel */}
@@ -3476,7 +3666,7 @@ function FF3SpriteRenderer({ sprite, act, zoom, showAxis, pan, previewOffset }: 
             }
 
             if (showAxis) {
-                ctx.strokeStyle = '#555';
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
                 ctx.lineWidth = 1;
                 ctx.beginPath(); ctx.moveTo(centerX + panX, 0); ctx.lineTo(centerX + panX, canvas.height); ctx.stroke();
                 ctx.beginPath(); ctx.moveTo(0, centerY + panY); ctx.lineTo(canvas.width, centerY + panY); ctx.stroke();
@@ -3570,7 +3760,7 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
             const panY = pan ? pan.y : 0;
 
             if (showAxis) {
-                ctx.strokeStyle = '#334155';
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
                 ctx.lineWidth = 1;
                 ctx.beginPath(); ctx.moveTo(0, centerY + panY); ctx.lineTo(canvas.width, centerY + panY); ctx.stroke();
                 ctx.beginPath(); ctx.moveTo(centerX + panX, 0); ctx.lineTo(centerX + panX, canvas.height); ctx.stroke();

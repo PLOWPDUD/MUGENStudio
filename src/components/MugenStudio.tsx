@@ -1891,7 +1891,7 @@ export default function MugenStudio({
                 )}
 
                 {activeMode === 'Sprites' && sffData && (
-                    <div className="flex flex-col gap-4 h-full">
+                    <div className="flex flex-col gap-4">
                         {/* Tab Switcher */}
                         <div className="flex bg-[#1a1a1a] p-1 rounded-lg border border-[#333] shrink-0">
                             <button 
@@ -1911,7 +1911,7 @@ export default function MugenStudio({
                         </div>
 
                         {spriteSidebarTab === 'gallery' ? (
-                            <div className="flex flex-col gap-4 flex-1 overflow-hidden">
+                            <div className="flex flex-col gap-4">
                                 {/* Sprite Selector */}
                                 <div className="flex justify-between items-center text-gray-300 bg-[#252525] p-2 border border-[#333] rounded shrink-0">
                                      <button className="px-2 py-0.5 hover:bg-[#444] rounded text-blue-400 font-bold" onClick={() => setSelectedSpriteIdx(Math.max(0, (selectedSpriteIdx || 0) - 1))}>&larr;</button>
@@ -1995,7 +1995,7 @@ export default function MugenStudio({
                                 </div>
 
                                 {/* Search and Gallery */}
-                                <div className="flex flex-col gap-2 flex-1 overflow-hidden">
+                                <div className="flex flex-col gap-2">
                                     <span className="text-[10px] text-gray-400 font-semibold border-b border-[#333] pb-1">Filter / Find Sprite:</span>
                                     <input 
                                         type="text"
@@ -2006,7 +2006,7 @@ export default function MugenStudio({
                                     />
 
                                     {/* Mini Sprite grid list */}
-                                    <div className="flex-1 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 flex flex-col gap-1 text-[11px]">
+                                    <div className="h-48 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 flex flex-col gap-1 text-[11px]">
                                         {sffData.images.map((img, i) => {
                                             const searchMatches = spriteSearch === '' || img.group.toString().includes(spriteSearch);
                                             if (!searchMatches) return null;
@@ -2025,7 +2025,7 @@ export default function MugenStudio({
                                 </div>
                             </div>
                         ) : (
-                            <div className="flex flex-col gap-4 flex-1 overflow-hidden">
+                            <div className="flex flex-col gap-4">
                                 {/* Palette Selector Header */}
                                 <div className="flex flex-col gap-2 shrink-0">
                                     <button 
@@ -2039,7 +2039,7 @@ export default function MugenStudio({
                                 </div>
 
                                 {/* Palette List */}
-                                <div className="flex flex-col gap-2 flex-1 overflow-hidden">
+                                <div className="flex flex-col gap-2">
                                      <div className="flex items-center justify-between border-b border-[#333] pb-1">
                                          <span className="text-[10px] text-gray-400 font-semibold">Character Palettes:</span>
                                          <button 
@@ -2049,7 +2049,7 @@ export default function MugenStudio({
                                              {showPaletteOverlay ? 'HIDE OVERLAY' : 'SHOW OVERLAY'}
                                          </button>
                                      </div>
-                                     <div className="flex-1 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 flex flex-col gap-1 text-[11px]">
+                                     <div className="h-48 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 flex flex-col gap-1 text-[11px]">
                                          {sffData.palettes.map((pal, i) => (
                                              <div 
                                                  key={i}
@@ -2104,7 +2104,7 @@ export default function MugenStudio({
                 )}
 
                 {activeMode === 'Animations' && airData && (
-                    <div className="flex flex-col gap-3 h-full">
+                    <div className="flex flex-col gap-3">
                         {/* Action select header */}
                         <div className="bg-[#242424] px-2 py-1.5 border border-[#333] rounded flex items-center justify-between">
                             <label className="text-[10px] text-gray-400 font-bold uppercase">Anim ID:</label>

@@ -3,7 +3,7 @@
  * Covers SFFv1 (ElecbyteSpr standard 512-byte header, followed by Subfile Nodes)
  * Decoding PCX RLE pixel blobs.
  */
-import { SffData, SffImage } from "./types";
+import { SffData, SffImage, SffPalette } from "./types";
 
 export function parseSffBinary(buffer: ArrayBuffer): SffData {
   const view = new DataView(buffer);
@@ -39,6 +39,8 @@ export function parseSffBinary(buffer: ArrayBuffer): SffData {
   let currentOffset = nextSubfileOffset;
   let parsedCount = 0;
 
+  let lastSubfileEnd = 0;
+
   // 4. Traverse Linked List of Subfiles
   while (currentOffset > 0 && currentOffset < view.byteLength && parsedCount < numImages) {
     const nextNodeOffset = view.getUint32(currentOffset, true);
@@ -71,6 +73,10 @@ export function parseSffBinary(buffer: ArrayBuffer): SffData {
     } else {
         const pcxOffset = currentOffset + 32;
         const pcxData = new Uint8Array(buffer, pcxOffset, subfileLength);
+        const subfileEnd = pcxOffset + subfileLength;
+        if (subfileEnd > lastSubfileEnd) {
+            lastSubfileEnd = subfileEnd;
+        }
         
         try {
             const decoded = decodePcx(pcxData);
@@ -103,10 +109,10 @@ export function parseSffBinary(buffer: ArrayBuffer): SffData {
   }
 
   let globalPalette: Uint8Array | undefined;
-  if (view.byteLength >= 768) {
+  // SFF v1 global palette is 768 bytes at the VERY end, IF it exists.
+  // It only exists if there are 768 bytes left after the last subfile.
+  if (view.byteLength >= lastSubfileEnd + 768) {
       const lastPalOffset = view.byteLength - 768;
-      // Check if there's a potential palette at the end of the file (common in SFF v1)
-      // We check if it's likely a palette (standard check is just reading it)
       globalPalette = new Uint8Array(1024);
       for (let i = 0; i < 256; i++) {
           globalPalette[i * 4] = view.getUint8(lastPalOffset + i * 3);
@@ -116,9 +122,35 @@ export function parseSffBinary(buffer: ArrayBuffer): SffData {
       }
   }
 
+  // Collect all unique palettes
+  const sffPalettes: SffPalette[] = [];
+  if (globalPalette) {
+      sffPalettes.push({ group: 1, item: 1, data: globalPalette });
+  }
+
+  // Also collect palettes from images that have them and are NOT shared
+  images.forEach(img => {
+      if (!img.isSharedPalette && img.palette) {
+          // Check if we already have this exact palette data
+          const existing = sffPalettes.find(p => 
+              p.data.length === img.palette!.length && 
+              p.data.every((v, i) => v === img.palette![i])
+          );
+          
+          if (!existing) {
+              sffPalettes.push({ group: img.group, item: img.image, data: img.palette });
+          }
+      }
+  });
+
+  // Fallback global palette for rendering sprites that marked themselves as shared but didn't find a global pal
+  if (!globalPalette && sffPalettes.length > 0) {
+      globalPalette = sffPalettes[0].data;
+  }
+
   // Assign the global palette to images that need it
   const finalImages = images.map(img => {
-      if (img.isSharedPalette && !img.palette && globalPalette) {
+      if (img.isSharedPalette && (!img.palette || img.palette === globalPalette) && globalPalette) {
           return { ...img, palette: globalPalette };
       }
       return img;
@@ -129,7 +161,8 @@ export function parseSffBinary(buffer: ArrayBuffer): SffData {
     numGroups,
     numImages,
     images: finalImages,
-    isV2: false
+    isV2: false,
+    palettes: sffPalettes
   };
 }
 
@@ -147,30 +180,45 @@ function parseSffV2(buffer: ArrayBuffer, view: DataView): SffData {
     
     const images: SffImage[] = [];
     
-    // Parse Palette Nodes (to get a default palette)
-    let defaultPalette: Uint8Array | undefined;
+    const palettes: SffPalette[] = [];
     
-    // Each Pal Node is 16 bytes:
-    // 0: group, 2: item, 4: numCols, 6: linked, 8: offset, 12: size
+    // Parse Palette Nodes
     if (numPalNodes > 0 && palNodeOffset < view.byteLength) {
-        const pOffsetRel = view.getUint32(palNodeOffset + 8, true);
-        const pSize = view.getUint32(palNodeOffset + 12, true);
-        const pOffset = ldataOffset + pOffsetRel; // Palettes are always in ldata
-        if (pSize === 1024 && pOffset + pSize <= view.byteLength) {
-            const rawPal = new Uint8Array(buffer, pOffset, pSize);
-            defaultPalette = new Uint8Array(1024);
-            for(let i=0; i<256; i++) {
-                defaultPalette[i*4] = rawPal[i*4];
-                defaultPalette[i*4+1] = rawPal[i*4+1];
-                defaultPalette[i*4+2] = rawPal[i*4+2];
-                if (isV200) {
-                    defaultPalette[i*4+3] = i === 0 ? 0 : 255;
-                } else {
-                    defaultPalette[i*4+3] = i === 0 ? 0 : rawPal[i*4+3];
+        for (let i = 0; i < numPalNodes; i++) {
+            const nodeOff = palNodeOffset + (i * 16);
+            if (nodeOff + 16 > view.byteLength) break;
+            
+            const pGroup = view.getUint16(nodeOff, true);
+            const pItem = view.getUint16(nodeOff + 2, true);
+            const pOffsetRel = view.getUint32(nodeOff + 8, true);
+            const pSize = view.getUint32(nodeOff + 12, true);
+            const pOffset = ldataOffset + pOffsetRel;
+
+            if ((pSize === 1024 || pSize === 768) && pOffset + pSize <= view.byteLength) {
+                const rawPal = new Uint8Array(buffer, pOffset, pSize);
+                const paletteData = new Uint8Array(1024);
+                const bytesPerColor = pSize / 256;
+
+                for (let j = 0; j < 256; j++) {
+                    paletteData[j * 4] = rawPal[j * bytesPerColor];
+                    paletteData[j * 4 + 1] = rawPal[j * bytesPerColor + 1];
+                    paletteData[j * 4 + 2] = rawPal[j * bytesPerColor + 2];
+                    if (pSize === 768 || isV200) {
+                        paletteData[j * 4 + 3] = j === 0 ? 0 : 255;
+                    } else {
+                        paletteData[j * 4 + 3] = rawPal[j * 4 + 3];
+                    }
                 }
+                palettes.push({
+                    group: pGroup,
+                    item: pItem,
+                    data: paletteData
+                });
             }
         }
     }
+
+    let defaultPalette = palettes.length > 0 ? palettes[0].data : undefined;
 
     // In SFFv2, sprite node is 28 bytes
     let currentOffset = spriteNodeOffset;
@@ -187,6 +235,7 @@ function parseSffV2(buffer: ArrayBuffer, view: DataView): SffData {
         const fmt = view.getUint8(currentOffset + 14);
         const dataOffsetRel = view.getUint32(currentOffset + 16, true);
         const dataSize = view.getUint32(currentOffset + 20, true);
+        const palIndex = view.getUint16(currentOffset + 24, true);
         const flags = view.getUint16(currentOffset + 26, true);
         
         const dataOffset = dataOffsetRel + ((flags & 1) === 0 ? ldataOffset : tdataOffset);
@@ -220,10 +269,12 @@ function parseSffV2(buffer: ArrayBuffer, view: DataView): SffData {
             } catch(e) {
                 console.warn(`Failed to decompress sprite ${group},${image}: FMT ${fmt}`, e);
             }
-        } else if (dataSize === 0) {
+        } else if (dataSize === 0 && linkIndex !== 0xFFFF && images[linkIndex]) {
             formatStr = "Linked";
-            isCompressed = false; // It's linked to another node
-            // Could resolve link if needed, but for now we render an empty block or metadata
+            isCompressed = false;
+            // The renderer will handle linkIndex if needed, or we just copy data
+            const source = images[linkIndex];
+            pixelIndices = source.pixelIndices;
         }
 
         images.push({
@@ -236,7 +287,7 @@ function parseSffV2(buffer: ArrayBuffer, view: DataView): SffData {
             pixelIndices,
             isSharedPalette: true,
             comment: "",
-            palette: defaultPalette,
+            palette: palettes[palIndex]?.data || defaultPalette,
             isCompressed,
             format: formatStr
         });
@@ -249,7 +300,8 @@ function parseSffV2(buffer: ArrayBuffer, view: DataView): SffData {
         numGroups: 0,
         numImages: numSpriteNodes,
         images,
-        isV2: true
+        isV2: true,
+        palettes
     };
 }
 

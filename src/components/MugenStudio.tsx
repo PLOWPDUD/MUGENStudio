@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { motion } from 'motion/react';
 import { 
-  File, FolderOpen, Save, Undo, Redo, Scissors, Copy, Clipboard,
-  Search, ArrowLeftRight, ZoomIn, ZoomOut, Plus, Minus, Play, Pause, AlertCircle, FileText, Image, PlayCircle, Settings, Trash2, Pen, Move, Hand, PaintBucket, Wand2, Crosshair,
-  Volume2, Music, Download, PlusCircle, Square, Eraser
+  File as FileIcon, FolderOpen, Save, Undo, Redo, Scissors, Copy, Clipboard,
+  Search, ArrowLeftRight, ZoomIn, ZoomOut, Plus, Minus, Play, Pause, AlertCircle, HelpCircle, FileText as FileTextIcon, Image as ImageIcon, PlayCircle, Settings, Trash2, Pen, Move, Hand, PaintBucket, Wand2, Crosshair,
+  Volume2, Music, Download, PlusCircle, Square, Eraser, Palette, Zap, Box
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { parseIniString, stringifyIni } from '../lib/mugen/defParser';
@@ -73,7 +74,17 @@ function generateBeepWav(freq: number, durationMs: number, type: 'sine' | 'squar
   return buffer;
 }
 
-export default function MugenStudio() {
+export default function MugenStudio({ 
+  initialAction, 
+  initialFiles,
+  onBackToHome,
+  onShowDocs
+}: { 
+  initialAction?: 'new' | 'open_zip' | 'import_folder', 
+  initialFiles?: FileList,
+  onBackToHome?: () => void,
+  onShowDocs?: () => void
+}) {
   const [activeMode, setActiveMode] = useState<'Definitions' | 'Sprites' | 'Animations' | 'Commands' | 'States' | 'Sounds'>('Definitions');
   
   // Data State
@@ -104,7 +115,10 @@ export default function MugenStudio() {
   const [spriteSearch, setSpriteSearch] = useState('');
   const [selectedSpriteIdx, setSelectedSpriteIdx] = useState<number>(0);
   const [selectedActionId, setSelectedActionId] = useState<number | null>(null);
-  const [selectedClsn, setSelectedClsn] = useState<{ type: 1 | 2; id: number } | null>(null);
+  const [selectedPaletteIdx, setSelectedPaletteIdx] = useState<number>(0);
+  const [selectedClsn, setSelectedClsn] = useState<{type: 'clsn1' | 'clsn2', index: number} | null>(null);
+  const paletteActInputRef = useRef<HTMLInputElement>(null);
+  const renderAreaRef = useRef<HTMLDivElement>(null);
   const [currentFrame, setCurrentFrame] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
@@ -114,6 +128,8 @@ export default function MugenStudio() {
 
   // Selected palette editing states
   const [selectedPalColorIdx, setSelectedPalColorIdx] = useState<number | null>(null);
+  const [spriteSidebarTab, setSpriteSidebarTab] = useState<'gallery' | 'palettes'>('gallery');
+  const [showPaletteOverlay, setShowPaletteOverlay] = useState(true);
   const [newActionIdText, setNewActionIdText] = useState('100');
 
   // Pivot drags & Canvas interactions
@@ -139,8 +155,10 @@ export default function MugenStudio() {
   const touchStartZoomRef = useRef<number>(zoom);
 
   // Sprite import states
-  const [pendingImportFiles, setPendingImportFiles] = useState<File[]>([]);
+  const [pendingImportFiles, setPendingImportFiles] = useState<{file: File, buffer: ArrayBuffer}[]>([]);
   const [showPaletteChoiceModal, setShowPaletteChoiceModal] = useState(false);
+  const [importGroup, setImportGroup] = useState<number>(0);
+  const [importIndex, setImportIndex] = useState<number>(0);
 
   // ZIP Export states
   const [showExportZipModal, setShowExportZipModal] = useState(false);
@@ -154,7 +172,25 @@ export default function MugenStudio() {
   const addSoundInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    // Populate with template files on mount so application loads fully on startup
+    // If we have initial files, process them immediately
+    if (initialFiles && initialFiles.length > 0) {
+      handleFileUpload({ target: { files: initialFiles } } as any);
+      return;
+    }
+
+    // If we're opening a zip or folder, but no files yet, don't auto-populate with templates yet
+    // unless it's explicitly a "new" action.
+    if (initialAction === 'open_zip' || initialAction === 'import_folder') {
+      // In a real app we might trigger the picker here, but for now we wait for user click
+      // or we can trigger it:
+      if (initialAction === 'open_zip') {
+        // We'll let the user click the "Open" button in the toolbar for now 
+        // to maintain standard flow, or we could trigger fileInputRef.current?.click()
+      }
+      return; // DON'T load templates
+    }
+
+    // Populate with template files
     setIniRawText(templateDef);
     setIniData(parseIniString(templateDef));
     setCnsRawText(templateCns);
@@ -232,92 +268,181 @@ export default function MugenStudio() {
     }
   };
 
-  const handleImportSpriteFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImportPaletteFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
-    setPendingImportFiles(files);
+
+    if (!sffData) {
+        alert("Load an SFF first or create a new project.");
+        return;
+    }
+
+    const nextPalettes = [...(sffData.palettes || [])];
+    
+    for (const file of files) {
+        try {
+            const buffer = await (file as any).arrayBuffer();
+            const paletteData = parseActBinary(buffer);
+            
+            let nextGroup = 1;
+            let nextItem = 1;
+            if (nextPalettes.length > 0) {
+                const lastPal = nextPalettes[nextPalettes.length - 1];
+                nextGroup = lastPal.group;
+                nextItem = lastPal.item + 1;
+            }
+
+            nextPalettes.push({
+                group: nextGroup,
+                item: nextItem,
+                data: paletteData
+            });
+        } catch (err: any) {
+            alert(`Failed to parse palette ${(file as any).name}: ${err.message}`);
+        }
+    }
+
+    setSffData({
+        ...sffData,
+        palettes: nextPalettes
+    });
+    setSelectedPaletteIdx(nextPalettes.length - 1);
+    if (paletteActInputRef.current) paletteActInputRef.current.value = '';
+  };
+
+  const handleDeletePalette = (idx: number) => {
+    if (!sffData || !sffData.palettes) return;
+    if (!window.confirm("Are you sure you want to delete this palette?")) return;
+    
+    const nextPalettes = sffData.palettes.filter((_, i) => i !== idx);
+    setSffData({
+        ...sffData,
+        palettes: nextPalettes
+    });
+    setSelectedPaletteIdx(Math.max(0, Math.min(nextPalettes.length - 1, selectedPaletteIdx)));
+  };
+
+  const handleUpdatePaletteMeta = (idx: number, key: 'group' | 'item', value: number) => {
+    if (!sffData || !sffData.palettes) return;
+    const nextPalettes = [...sffData.palettes];
+    nextPalettes[idx] = { ...nextPalettes[idx], [key]: value };
+    setSffData({
+        ...sffData,
+        palettes: nextPalettes
+    });
+  };
+
+  const handleImportSpriteFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    
+    // Read files immediately to avoid expiration of references
+    const bufferedFiles = await Promise.all(
+      files.map(async (f: File) => ({
+        file: f,
+        buffer: await f.arrayBuffer()
+      }))
+    );
+
+    let nextGroup = 0;
+    let nextImg = 0;
+    if (sffData && sffData.images.length > 0) {
+      const lastImg = sffData.images[sffData.images.length - 1];
+      nextGroup = lastImg.group;
+      nextImg = lastImg.image + 1;
+    }
+    setImportGroup(nextGroup);
+    setImportIndex(nextImg);
+
+    setPendingImportFiles(bufferedFiles);
     setShowPaletteChoiceModal(true);
     if (spritePngInputRef.current) spritePngInputRef.current.value = '';
   };
 
-  const processSpriteImport = (mode: 'image_palette' | 'adapt' | 'exchange') => {
+  const processSpriteImport = async (mode: 'image_palette' | 'adapt' | 'exchange') => {
     setShowPaletteChoiceModal(false);
-    
-    // Process only first file for simplicity in this snippet, can easily be extended to all
-    const file = pendingImportFiles[0];
-    if (!file) return;
+    if (pendingImportFiles.length === 0) return;
 
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      const img = new Image();
-      img.onload = () => {
-        const offscreen = document.createElement('canvas');
-        offscreen.width = img.width;
-        offscreen.height = img.height;
-        const ctx = offscreen.getContext('2d');
-        if (!ctx) return;
-        ctx.drawImage(img, 0, 0);
-        const imgData = ctx.getImageData(0, 0, img.width, img.height);
-        
-        // Active palette
-        const currentPal = actPalette || sffData?.images[selectedSpriteIdx || 0]?.palette || null;
-        
-        let targetPaletteForProcessing = currentPal;
-        if (mode === 'image_palette') {
-           targetPaletteForProcessing = null; // Forces parser to extract new palette from image
-        }
-        
-        const { indices, palette } = imageToSpriteIndices(imgData.data, img.width, img.height, targetPaletteForProcessing);
+    let currentSff = sffData;
+    let currentGlobalPal = actPalette;
+    let currentG = importGroup;
+    let currentI = importIndex;
 
-        // For 'exchange', we take the newfound/extracted palette and push it to the main state
-        if (mode === 'exchange') {
-           if (palette) {
-              setActPalette(palette);
-           }
-        }
+    const newImages = currentSff ? [...currentSff.images] : [];
 
-        let nextGroup = 0;
-        let nextImg = 0;
-        if (sffData && sffData.images.length > 0) {
-          const lastImg = sffData.images[sffData.images.length - 1];
-          nextGroup = lastImg.group;
-          nextImg = lastImg.image + 1;
-        }
+    for (const item of pendingImportFiles) {
+      const blob = new Blob([item.buffer]);
+      const url = URL.createObjectURL(blob);
+      
+      await new Promise<void>((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const offscreen = document.createElement('canvas');
+          offscreen.width = img.width;
+          offscreen.height = img.height;
+          const ctx = offscreen.getContext('2d');
+          if (!ctx) { resolve(); return; }
+          ctx.drawImage(img, 0, 0);
+          const imgData = ctx.getImageData(0, 0, img.width, img.height);
+          
+          // Active palette
+          const activePal = currentGlobalPal || (newImages.length > 0 ? newImages[0].palette : null);
+          
+          let targetPaletteForProcessing = activePal;
+          if (mode === 'image_palette' || mode === 'exchange') {
+             targetPaletteForProcessing = null; // Forces extraction of new palette
+          }
+          
+          const { indices, palette } = imageToSpriteIndices(imgData.data, img.width, img.height, targetPaletteForProcessing);
 
-        const newSprite: any = {
-          group: nextGroup,
-          image: nextImg,
-          xOffset: Math.round(img.width / 2),
-          yOffset: Math.round(img.height / 2),
-          width: img.width,
-          height: img.height,
-          pixelIndices: indices,
-          isSharedPalette: mode !== 'image_palette',
-          comment: file.name,
-          palette: palette
+          if (mode === 'exchange' && palette) {
+             currentGlobalPal = palette;
+             setActPalette(palette);
+          }
+
+          const newSprite: any = {
+            group: currentG,
+            image: currentI,
+            xOffset: Math.round(img.width / 2),
+            yOffset: Math.round(img.height / 2),
+            width: img.width,
+            height: img.height,
+            pixelIndices: indices,
+            isSharedPalette: mode !== 'image_palette',
+            comment: item.file.name,
+            palette: mode === 'image_palette' ? palette : (mode === 'exchange' ? palette : null)
+          };
+
+          newImages.push(newSprite);
+          currentI++;
+          URL.revokeObjectURL(url);
+          resolve();
         };
+        img.onerror = () => {
+           URL.revokeObjectURL(url);
+           resolve();
+        };
+        img.src = url;
+      });
+    }
 
-        if (sffData) {
-          const updatedImages = [...sffData.images, newSprite];
-          setSffData({
-            ...sffData,
-            numImages: updatedImages.length,
-            images: updatedImages
-          });
-          setSelectedSpriteIdx(updatedImages.length - 1);
-        } else {
-          setSffData({
-            version: 'ElecbyteSpr\x00',
-            numGroups: 1,
-            numImages: 1,
-            images: [newSprite]
-          });
-          setSelectedSpriteIdx(0);
-        }
-      };
-      img.src = event.target?.result as string;
-    };
-    reader.readAsDataURL(file);
+    if (currentSff) {
+      setSffData({
+        ...currentSff,
+        numImages: newImages.length,
+        images: newImages
+      });
+      setSelectedSpriteIdx(newImages.length - 1);
+    } else {
+      setSffData({
+        version: 'ElecbyteSpr\x00',
+        numGroups: 1, // Will be recalculated or handled by parser
+        numImages: newImages.length,
+        images: newImages
+      });
+      setSelectedSpriteIdx(0);
+    }
+
     setPendingImportFiles([]);
   };
 
@@ -659,9 +784,16 @@ export default function MugenStudio() {
                 const buffer = await file.arrayBuffer();
                 const parsed = parseSffBinary(buffer);
                 setSffData(parsed);
-                // If no .act file in this batch, use first available palette from the SFF as default
+                
+                // Select the first available palette
+                if (parsed.palettes && parsed.palettes.length > 0) {
+                    setSelectedPaletteIdx(0);
+                }
+
+                // If no .act file in this batch, use the first available palette as the fallback
                 if (!hasActInSelection) {
-                   const firstPalSprite = parsed.images.find(img => img.palette);
+                   const firstPal = parsed.palettes && parsed.palettes.length > 0 ? parsed.palettes[0].data : null;
+                   const firstPalSprite = firstPal ? { palette: firstPal } : parsed.images.find(img => img.palette);
                    if (firstPalSprite && firstPalSprite.palette) {
                       setActPalette(new Uint8Array(firstPalSprite.palette));
                    }
@@ -709,7 +841,7 @@ export default function MugenStudio() {
     }
   };
 
-  const menuItems = ["Project", "Edit", "View", "Debug", "Palettes", "Backgrounds", "Sprites", "Animations", "Commands", "States", "Sounds", "Tools", "Help"];
+  const menuItems = ["Project", "Edit", "View", "Debug", "Backgrounds", "Sprites", "Animations", "Commands", "States", "Sounds", "Tools", "Help"];
 
   const handleMenuClick = (item: string) => {
     if (['Sprites', 'Animations', 'Commands', 'States', 'Sounds'].includes(item)) {
@@ -997,7 +1129,7 @@ export default function MugenStudio() {
     if (channel === 'r') nextPal[offset] = value;
     if (channel === 'g') nextPal[offset + 1] = value;
     if (channel === 'b') nextPal[offset + 2] = value;
-    nextPal[offset + 3] = 255; // solid alpha
+    nextPal[offset + 3] = selectedPalColorIdx === 0 ? 0 : 255; // index 0 must be transparent
 
     if (actPalette) {
       setActPalette(nextPal);
@@ -1027,7 +1159,7 @@ export default function MugenStudio() {
     nextPal[offset] = r;
     nextPal[offset + 1] = g;
     nextPal[offset + 2] = b;
-    nextPal[offset + 3] = 255;
+    nextPal[offset + 3] = selectedPalColorIdx === 0 ? 0 : 255;
 
     if (actPalette) {
       setActPalette(nextPal);
@@ -1274,10 +1406,17 @@ export default function MugenStudio() {
 
       {/* Menu Bar */}
       <div className="flex items-center px-1 bg-[#1a1a1a] border-b border-[#3a3a3a] overflow-x-auto whitespace-nowrap shrink-0 max-w-[100vw] custom-scrollbar">
-         <div className="px-2 py-1 cursor-default opacity-80 flex items-center gap-1 shrink-0">
-             <div className="w-3 h-3 bg-blue-500 rounded-full" />
-             MUGENStudio
+         <div 
+           className="px-2 py-1 cursor-pointer hover:bg-white/5 opacity-90 flex items-center gap-2 group shrink-0 transition-colors"
+           onClick={onBackToHome}
+           title="Go back to Home Screen"
+         >
+             <div className="w-5 h-5 bg-gradient-to-br from-blue-500 to-blue-600 rounded flex items-center justify-center shadow shadow-blue-500/20 group-hover:scale-110 transition-transform">
+                <Box className="w-3.5 h-3.5 text-white" />
+             </div>
+             <span className="font-bold tracking-tight text-zinc-300 group-hover:text-white transition-colors">MUGENStudio</span>
          </div>
+         <div className="w-[1px] h-4 bg-zinc-800 mx-2" />
          {menuItems.map(item => (
             <div 
                 key={item} 
@@ -1287,11 +1426,19 @@ export default function MugenStudio() {
                 {item}
             </div>
          ))}
+         <div className="w-[1px] h-4 bg-zinc-800 mx-2" />
+         <button 
+           onClick={onShowDocs}
+           className="px-3 py-1 cursor-pointer transition-colors text-sm font-medium text-zinc-400 hover:text-white hover:bg-white/5 rounded flex items-center gap-1.5"
+         >
+           <HelpCircle size={14} className="text-zinc-500" />
+           Help
+         </button>
       </div>
 
       {/* Main Toolbar */}
       <div className="flex items-center gap-1 px-2 py-1 border-b border-[#111111] overflow-x-auto whitespace-nowrap shrink-0 max-w-[100vw]" style={{ background: 'linear-gradient(to bottom, #4a4a4a, #2f2f2f)' }}>
-        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="New" onClick={handleCreateNew}><File size={16} color="#4ade80" /></button>
+        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="New" onClick={handleCreateNew}><FileIcon size={16} color="#4ade80" /></button>
         <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="Open" onClick={() => fileInputRef.current?.click()}><FolderOpen size={16} color="#60a5fa" /></button>
         <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="Save" onClick={handleSave}><Save size={16} color="#60a5fa" /></button>
         <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="Export Character to ZIP" onClick={() => setShowExportZipModal(true)}><Download size={16} color="#4ade80" /></button>
@@ -1434,118 +1581,215 @@ export default function MugenStudio() {
                 )}
 
                 {activeMode === 'Sprites' && sffData && (
-                    <div className="flex flex-col gap-4">
-                        {/* Sprite Selector */}
-                        <div className="flex justify-between items-center text-gray-300 bg-[#252525] p-2 border border-[#333] rounded">
-                             <button className="px-2 py-0.5 hover:bg-[#444] rounded text-blue-400 font-bold" onClick={() => setSelectedSpriteIdx(Math.max(0, (selectedSpriteIdx || 0) - 1))}>&larr;</button>
-                             <span className="font-mono text-[11px]">No. {selectedSpriteIdx !== null ? selectedSpriteIdx + 1 : 0} / {sffData.numImages}</span>
-                             <button className="px-2 py-0.5 hover:bg-[#444] rounded text-blue-400 font-bold" onClick={() => setSelectedSpriteIdx(Math.min(sffData.numImages - 1, (selectedSpriteIdx || 0) + 1))}>&rarr;</button>
-                        </div>
-
-                        {/* Import/Delete/Duplicate Tools */}
-                        <div className="flex flex-col gap-2 pb-2 border-b border-[#333]">
-                            <div className="grid grid-cols-2 gap-2">
-                                <button 
-                                    onClick={() => spritePngInputRef.current?.click()}
-                                    className="px-3 py-1.5 bg-green-900/40 border border-green-700/80 rounded hover:bg-green-900/60 text-green-400 font-bold text-center flex items-center justify-center gap-1.5"
-                                    title="Import custom PNG/JPG file"
-                                >
-                                    <Plus size={12} />
-                                    Import
-                                </button>
-                                <button 
-                                    onClick={handleDeleteSprite}
-                                    className="px-3 py-1.5 bg-red-955/40 border border-red-800/80 rounded hover:bg-red-955/60 text-red-400 font-bold text-center flex items-center justify-center gap-1.5"
-                                    title="Delete active sprite from sheet"
-                                >
-                                    <Minus size={12} />
-                                    Delete
-                                </button>
-                            </div>
+                    <div className="flex flex-col gap-4 h-full">
+                        {/* Tab Switcher */}
+                        <div className="flex bg-[#1a1a1a] p-1 rounded-lg border border-[#333] shrink-0">
                             <button 
-                                onClick={handleDuplicateSprite}
-                                className="px-3 py-1.5 bg-blue-900/40 border border-blue-700/80 rounded hover:bg-blue-900/60 text-blue-400 font-bold text-center flex items-center justify-center gap-1.5"
-                                title="Duplicate active sprite (Index + 1)"
+                                onClick={() => setSpriteSidebarTab('gallery')}
+                                className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all ${spriteSidebarTab === 'gallery' ? 'bg-[#333] text-blue-400 shadow-sm' : 'text-gray-500 hover:text-gray-300'}`}
                             >
-                                <Copy size={12} />
-                                Duplicate Sprite
+                                <ImageIcon size={12} />
+                                Gallery
                             </button>
-                            <input 
-                                type="file" 
-                                ref={spritePngInputRef} 
-                                onChange={handleImportSpriteFile} 
-                                accept="image/png, image/jpeg" 
-                                className="hidden" 
-                            />
+                            <button 
+                                onClick={() => setSpriteSidebarTab('palettes')}
+                                className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all ${spriteSidebarTab === 'palettes' ? 'bg-[#333] text-purple-400 shadow-sm' : 'text-gray-500 hover:text-gray-300'}`}
+                            >
+                                <Palette size={12} />
+                                Palettes
+                            </button>
                         </div>
 
-                        {/* Group / Image Inputs */}
-                        <div className="bg-[#242424] p-3 border border-[#333] rounded flex flex-col gap-3">
-                            <div className="grid grid-cols-2 gap-2">
-                                <div className="flex flex-col gap-1">
-                                    <span className="text-[10px] text-gray-400">Group No.</span>
-                                    <div className="flex bg-[#1e1e1e] border border-[#3a3a3a] items-center rounded overflow-hidden">
-                                        <button className="text-blue-500 hover:bg-[#333] px-2 py-0.5" onClick={() => handleUpdateSprite('group', (sffData.images[selectedSpriteIdx]?.group ?? 0) - 1)}>-</button>
-                                        <input type="number" className="bg-transparent w-full text-center outline-none text-xs" value={sffData.images[selectedSpriteIdx]?.group ?? 0} onChange={e => handleUpdateSprite('group', parseInt(e.target.value) || 0)} />
-                                        <button className="text-blue-500 hover:bg-[#333] px-2 py-0.5" onClick={() => handleUpdateSprite('group', (sffData.images[selectedSpriteIdx]?.group ?? 0) + 1)}>+</button>
-                                    </div>
+                        {spriteSidebarTab === 'gallery' ? (
+                            <div className="flex flex-col gap-4 flex-1 overflow-hidden">
+                                {/* Sprite Selector */}
+                                <div className="flex justify-between items-center text-gray-300 bg-[#252525] p-2 border border-[#333] rounded shrink-0">
+                                     <button className="px-2 py-0.5 hover:bg-[#444] rounded text-blue-400 font-bold" onClick={() => setSelectedSpriteIdx(Math.max(0, (selectedSpriteIdx || 0) - 1))}>&larr;</button>
+                                     <span className="font-mono text-[11px]">No. {selectedSpriteIdx !== null ? selectedSpriteIdx + 1 : 0} / {sffData.numImages}</span>
+                                     <button className="px-2 py-0.5 hover:bg-[#444] rounded text-blue-400 font-bold" onClick={() => setSelectedSpriteIdx(Math.min(sffData.numImages - 1, (selectedSpriteIdx || 0) + 1))}>&rarr;</button>
                                 </div>
-                                <div className="flex flex-col gap-1">
-                                    <span className="text-[10px] text-gray-400">Image No.</span>
-                                    <div className="flex bg-[#1e1e1e] border border-[#3a3a3a] items-center rounded overflow-hidden">
-                                        <button className="text-blue-500 hover:bg-[#333] px-2 py-0.5" onClick={() => handleUpdateSprite('image', (sffData.images[selectedSpriteIdx]?.image ?? 0) - 1)}>-</button>
-                                        <input type="number" className="bg-transparent w-full text-center outline-none text-xs" value={sffData.images[selectedSpriteIdx]?.image ?? 0} onChange={e => handleUpdateSprite('image', parseInt(e.target.value) || 0)} />
-                                        <button className="text-blue-500 hover:bg-[#333] px-2 py-0.5" onClick={() => handleUpdateSprite('image', (sffData.images[selectedSpriteIdx]?.image ?? 0) + 1)}>+</button>
-                                    </div>
-                                </div>
-                            </div>
 
-                            {/* Pivot axis settings */}
-                            <div className="text-[10px] font-semibold text-gray-400 border-b border-[#333] pb-1 mt-1">Pivot Offset (Coordinates)</div>
-                            <div className="grid grid-cols-2 gap-2">
-                                <div className="flex flex-col gap-1">
-                                    <span className="text-[10px] text-gray-400">X Offset:</span>
-                                    <input type="number" className="bg-[#1e1e1e] border border-[#3a3a3a] px-2 py-1 text-center outline-none text-xs rounded" value={sffData.images[selectedSpriteIdx]?.xOffset ?? 0} onChange={e => handleUpdateSprite('xOffset', parseInt(e.target.value) || 0)} />
-                                </div>
-                                <div className="flex flex-col gap-1">
-                                    <span className="text-[10px] text-gray-400">Y Offset:</span>
-                                    <input type="number" className="bg-[#1e1e1e] border border-[#3a3a3a] px-2 py-1 text-center outline-none text-xs rounded" value={sffData.images[selectedSpriteIdx]?.yOffset ?? 0} onChange={e => handleUpdateSprite('yOffset', parseInt(e.target.value) || 0)} />
-                                </div>
-                            </div>
-                            <div className="text-[9px] text-gray-500 text-center italic mt-1 pb-1">
-                                Drag the image on the canvas to adjust visually
-                            </div>
-                        </div>
-
-                        {/* Search and Gallery */}
-                        <div className="flex flex-col gap-2 flex-1">
-                            <span className="text-[10px] text-gray-400 font-semibold border-b border-[#333] pb-1">Filter / Find Sprite:</span>
-                            <input 
-                                type="text"
-                                placeholder="Search by group indices..."
-                                className="bg-[#2a2a2a] border border-[#3a3a3a] w-full px-2 py-1 outline-none text-gray-300 rounded text-xs"
-                                value={spriteSearch}
-                                onChange={e => setSpriteSearch(e.target.value)}
-                            />
-
-                            {/* Mini Sprite grid list */}
-                            <div className="max-h-52 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 flex flex-col gap-1 text-[11px]">
-                                {sffData.images.map((img, i) => {
-                                    const searchMatches = spriteSearch === '' || img.group.toString().includes(spriteSearch);
-                                    if (!searchMatches) return null;
-                                    return (
-                                        <div 
-                                            key={i}
-                                            onClick={() => setSelectedSpriteIdx(i)}
-                                            className={`flex items-center justify-between p-1 rounded cursor-pointer hover:bg-[#333] ${selectedSpriteIdx === i ? 'bg-blue-900/40 text-blue-400 text-bold border-l-2 border-blue-500' : 'text-gray-400'}`}
+                                {/* Import/Delete/Duplicate Tools */}
+                                <div className="flex flex-col gap-2 pb-2 border-b border-[#333] shrink-0">
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <button 
+                                            onClick={() => spritePngInputRef.current?.click()}
+                                            className="px-3 py-1.5 bg-green-900/40 border border-green-700/80 rounded hover:bg-green-900/60 text-green-400 font-bold text-center flex items-center justify-center gap-1.5"
+                                            title="Import custom PNG/JPG file"
                                         >
-                                            <span>SFF Image index {i}</span>
-                                            <span className="font-mono text-[10px]">{img.group},{img.image}</span>
+                                            <Plus size={12} />
+                                            Import
+                                        </button>
+                                        <button 
+                                            onClick={handleDeleteSprite}
+                                            className="px-3 py-1.5 bg-red-955/40 border border-red-800/80 rounded hover:bg-red-955/60 text-red-400 font-bold text-center flex items-center justify-center gap-1.5"
+                                            title="Delete active sprite from sheet"
+                                        >
+                                            <Minus size={12} />
+                                            Delete
+                                        </button>
+                                    </div>
+                                    <button 
+                                        onClick={handleDuplicateSprite}
+                                        className="px-3 py-1.5 bg-blue-900/40 border border-blue-700/80 rounded hover:bg-blue-900/60 text-blue-400 font-bold text-center flex items-center justify-center gap-1.5"
+                                        title="Duplicate active sprite (Index + 1)"
+                                    >
+                                        <Copy size={12} />
+                                        Duplicate Sprite
+                                    </button>
+                                    <input 
+                                        type="file" 
+                                        ref={spritePngInputRef} 
+                                        onChange={handleImportSpriteFile} 
+                                        accept="image/png, image/jpeg" 
+                                        className="hidden" 
+                                    />
+                                </div>
+
+                                {/* Group / Image Inputs */}
+                                <div className="bg-[#242424] p-3 border border-[#333] rounded flex flex-col gap-3 shrink-0">
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div className="flex flex-col gap-1">
+                                            <span className="text-[10px] text-gray-400">Group No.</span>
+                                            <div className="flex bg-[#1e1e1e] border border-[#3a3a3a] items-center rounded overflow-hidden">
+                                                <button className="text-blue-500 hover:bg-[#333] px-2 py-0.5" onClick={() => handleUpdateSprite('group', (sffData.images[selectedSpriteIdx]?.group ?? 0) - 1)}>-</button>
+                                                <input type="number" className="bg-transparent w-full text-center outline-none text-xs" value={sffData.images[selectedSpriteIdx]?.group ?? 0} onChange={e => handleUpdateSprite('group', parseInt(e.target.value) || 0)} />
+                                                <button className="text-blue-500 hover:bg-[#333] px-2 py-0.5" onClick={() => handleUpdateSprite('group', (sffData.images[selectedSpriteIdx]?.group ?? 0) + 1)}>+</button>
+                                            </div>
                                         </div>
-                                    );
-                                })}
+                                        <div className="flex flex-col gap-1">
+                                            <span className="text-[10px] text-gray-400">Image No.</span>
+                                            <div className="flex bg-[#1e1e1e] border border-[#3a3a3a] items-center rounded overflow-hidden">
+                                                <button className="text-blue-500 hover:bg-[#333] px-2 py-0.5" onClick={() => handleUpdateSprite('image', (sffData.images[selectedSpriteIdx]?.image ?? 0) - 1)}>-</button>
+                                                <input type="number" className="bg-transparent w-full text-center outline-none text-xs" value={sffData.images[selectedSpriteIdx]?.image ?? 0} onChange={e => handleUpdateSprite('image', parseInt(e.target.value) || 0)} />
+                                                <button className="text-blue-500 hover:bg-[#333] px-2 py-0.5" onClick={() => handleUpdateSprite('image', (sffData.images[selectedSpriteIdx]?.image ?? 0) + 1)}>+</button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Pivot axis settings */}
+                                    <div className="text-[10px] font-semibold text-gray-400 border-b border-[#333] pb-1 mt-1">Pivot Offset (Coordinates)</div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div className="flex flex-col gap-1">
+                                            <span className="text-[10px] text-gray-400">X Offset:</span>
+                                            <input type="number" className="bg-[#1e1e1e] border border-[#3a3a3a] px-2 py-1 text-center outline-none text-xs rounded" value={sffData.images[selectedSpriteIdx]?.xOffset ?? 0} onChange={e => handleUpdateSprite('xOffset', parseInt(e.target.value) || 0)} />
+                                        </div>
+                                        <div className="flex flex-col gap-1">
+                                            <span className="text-[10px] text-gray-400">Y Offset:</span>
+                                            <input type="number" className="bg-[#1e1e1e] border border-[#3a3a3a] px-2 py-1 text-center outline-none text-xs rounded" value={sffData.images[selectedSpriteIdx]?.yOffset ?? 0} onChange={e => handleUpdateSprite('yOffset', parseInt(e.target.value) || 0)} />
+                                        </div>
+                                    </div>
+                                    <div className="text-[9px] text-gray-500 text-center italic mt-1 pb-1">
+                                        Drag the image on the canvas to adjust visually
+                                    </div>
+                                </div>
+
+                                {/* Search and Gallery */}
+                                <div className="flex flex-col gap-2 flex-1 overflow-hidden">
+                                    <span className="text-[10px] text-gray-400 font-semibold border-b border-[#333] pb-1">Filter / Find Sprite:</span>
+                                    <input 
+                                        type="text"
+                                        placeholder="Search by group indices..."
+                                        className="bg-[#2a2a2a] border border-[#3a3a3a] w-full px-2 py-1 outline-none text-gray-300 rounded text-xs"
+                                        value={spriteSearch}
+                                        onChange={e => setSpriteSearch(e.target.value)}
+                                    />
+
+                                    {/* Mini Sprite grid list */}
+                                    <div className="flex-1 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 flex flex-col gap-1 text-[11px]">
+                                        {sffData.images.map((img, i) => {
+                                            const searchMatches = spriteSearch === '' || img.group.toString().includes(spriteSearch);
+                                            if (!searchMatches) return null;
+                                            return (
+                                                <div 
+                                                    key={i}
+                                                    onClick={() => setSelectedSpriteIdx(i)}
+                                                    className={`flex items-center justify-between p-1 rounded cursor-pointer hover:bg-[#333] ${selectedSpriteIdx === i ? 'bg-blue-900/40 text-blue-400 text-bold border-l-2 border-blue-500' : 'text-gray-400'}`}
+                                                >
+                                                    <span>SFF Image index {i}</span>
+                                                    <span className="font-mono text-[10px]">{img.group},{img.image}</span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
                             </div>
-                        </div>
+                        ) : (
+                            <div className="flex flex-col gap-4 flex-1 overflow-hidden">
+                                {/* Palette Selector Header */}
+                                <div className="flex flex-col gap-2 shrink-0">
+                                    <button 
+                                        onClick={() => paletteActInputRef.current?.click()}
+                                        className="w-full py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-bold text-[10px] flex items-center justify-center gap-1.5 shadow-md transition-all"
+                                    >
+                                        <Plus size={12} />
+                                        Import .ACT Palette
+                                    </button>
+                                    <input type="file" ref={paletteActInputRef} className="hidden" accept=".act" onChange={handleImportPaletteFile} />
+                                </div>
+
+                                {/* Palette List */}
+                                <div className="flex flex-col gap-2 flex-1 overflow-hidden">
+                                     <div className="flex items-center justify-between border-b border-[#333] pb-1">
+                                         <span className="text-[10px] text-gray-400 font-semibold">Character Palettes:</span>
+                                         <button 
+                                            onClick={() => setShowPaletteOverlay(!showPaletteOverlay)}
+                                            className={`text-[9px] font-bold px-2 py-0.5 rounded border transition-all ${showPaletteOverlay ? 'bg-purple-900/30 text-purple-400 border-purple-500/30' : 'bg-[#333] text-gray-500 border-[#444] hover:text-gray-300'}`}
+                                         >
+                                             {showPaletteOverlay ? 'HIDE OVERLAY' : 'SHOW OVERLAY'}
+                                         </button>
+                                     </div>
+                                     <div className="flex-1 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 flex flex-col gap-1 text-[11px]">
+                                         {sffData.palettes.map((pal, i) => (
+                                             <div 
+                                                 key={i}
+                                                 onClick={() => setSelectedPaletteIdx(i)}
+                                                 className={`flex items-center justify-between p-2 rounded cursor-pointer hover:bg-[#333] transition-all ${selectedPaletteIdx === i ? 'bg-purple-900/40 text-purple-400 font-bold border-l-2 border-purple-500' : 'text-gray-400'}`}
+                                             >
+                                                 <div className="flex items-center gap-2">
+                                                     <Palette size={12} className={selectedPaletteIdx === i ? 'text-purple-400' : 'text-gray-600'} />
+                                                     <span>{pal.group}, {pal.item}</span>
+                                                 </div>
+                                                 {selectedPaletteIdx === i && <span className="text-[8px] bg-purple-500 text-white px-1 rounded">ACTIVE</span>}
+                                             </div>
+                                         ))}
+                                         {sffData.palettes.length === 0 && (
+                                             <div className="p-4 text-center text-gray-500 italic text-[10px]">
+                                                 No palettes detected in SFF. Import an .act file to begin.
+                                             </div>
+                                         )}
+                                     </div>
+
+                                     {/* Export current */}
+                                     {(sffData.palettes[selectedPaletteIdx] || actPalette) && (
+                                         <button 
+                                            onClick={() => {
+                                                const pal = sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette;
+                                                if (!pal) return;
+                                                const actBuffer = new Uint8Array(768);
+                                                for (let i = 0; i < 256; i++) {
+                                                    actBuffer[i * 3] = pal[i * 4];
+                                                    actBuffer[i * 3 + 1] = pal[i * 4 + 1];
+                                                    actBuffer[i * 3 + 2] = pal[i * 4 + 2];
+                                                }
+                                                const blob = new Blob([actBuffer], { type: 'application/octet-stream' });
+                                                const url = URL.createObjectURL(blob);
+                                                const a = document.createElement('a');
+                                                a.href = url;
+                                                const palMeta = sffData?.palettes?.[selectedPaletteIdx];
+                                                const fileName = palMeta ? `pal_${palMeta.group}_${palMeta.item}.act` : 'palette_export.act';
+                                                a.download = fileName;
+                                                a.click();
+                                            }}
+                                            className="mt-2 w-full py-1.5 bg-[#222] border border-[#333] text-gray-300 rounded text-[9px] hover:bg-[#2a2a2a] flex items-center justify-center gap-2"
+                                         >
+                                             <Download size={11} />
+                                             Export Current .ACT
+                                         </button>
+                                     )}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 )}
 
@@ -1943,6 +2187,78 @@ export default function MugenStudio() {
                         </div>
                     </div>
                 )}
+
+                {activeMode === 'Palettes' && sffData && (
+                    <div className="flex flex-col gap-4">
+                        <div className="text-xs font-semibold text-gray-400 border-b border-[#333333] pb-1 uppercase">Palette Manager</div>
+                        
+                        <div className="flex flex-col gap-2">
+                            <button 
+                                onClick={() => paletteActInputRef.current?.click()}
+                                className="px-3 py-2 bg-blue-900/40 border border-blue-700/80 rounded hover:bg-blue-900/60 text-blue-400 font-bold text-center flex items-center justify-center gap-2"
+                            >
+                                <Plus size={14} />
+                                Import Palette (.act)
+                            </button>
+                            <input 
+                                type="file" 
+                                ref={paletteActInputRef} 
+                                onChange={handleImportPaletteFile} 
+                                accept=".act" 
+                                multiple
+                                className="hidden" 
+                            />
+                        </div>
+
+                        <div className="flex flex-col gap-2">
+                            <div className="text-[10px] text-gray-400 font-semibold uppercase">Included Palettes</div>
+                            <div className="max-h-96 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 flex flex-col gap-1 text-[11px] custom-scrollbar">
+                                {(sffData.palettes || []).map((pal, i) => (
+                                    <div 
+                                        key={i}
+                                        onClick={() => setSelectedPaletteIdx(i)}
+                                        className={`flex flex-col p-2 rounded border cursor-pointer transition-all ${selectedPaletteIdx === i ? 'bg-blue-900/30 border-blue-600/80' : 'bg-[#222] border-transparent hover:border-[#444]'}`}
+                                    >
+                                        <div className="flex items-center justify-between mb-1">
+                                            <span className={`font-bold font-mono ${selectedPaletteIdx === i ? 'text-blue-400' : 'text-gray-300'}`}>Pal No. {i + 1}</span>
+                                            <button 
+                                                onClick={(e) => { e.stopPropagation(); handleDeletePalette(i); }}
+                                                className="text-red-500 hover:bg-red-955/20 p-1 rounded transition-colors"
+                                            >
+                                                <Trash2 size={12} />
+                                            </button>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2 mt-1">
+                                            <div className="flex flex-col gap-1">
+                                                <span className="text-[9px] text-gray-500 uppercase font-bold">Group</span>
+                                                <input 
+                                                    type="number"
+                                                    value={pal.group}
+                                                    onChange={(e) => handleUpdatePaletteMeta(i, 'group', parseInt(e.target.value) || 0)}
+                                                    className="bg-[#111] border border-[#333] rounded px-1.5 py-1 text-[10px] outline-none text-blue-400 font-mono focus:border-blue-500"
+                                                    onClick={e => e.stopPropagation()}
+                                                />
+                                            </div>
+                                            <div className="flex flex-col gap-1">
+                                                <span className="text-[9px] text-gray-500 uppercase font-bold">Item No</span>
+                                                <input 
+                                                    type="number"
+                                                    value={pal.item}
+                                                    onChange={(e) => handleUpdatePaletteMeta(i, 'item', parseInt(e.target.value) || 0)}
+                                                    className="bg-[#111] border border-[#333] rounded px-1.5 py-1 text-[10px] outline-none text-blue-400 font-mono focus:border-blue-500"
+                                                    onClick={e => e.stopPropagation()}
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                                {(!sffData.palettes || sffData.palettes.length === 0) && (
+                                    <div className="text-center py-6 text-gray-500 italic text-[10px]">No internal palettes in SFF.</div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
          </div>
 
@@ -2008,7 +2324,7 @@ export default function MugenStudio() {
          )}
 
          {/* Center Render Area */}
-         <div className={`flex-1 flex-col relative bg-[#333333] ${mobileTab === 'center' ? 'flex' : 'hidden md:flex'}`}>
+         <div ref={renderAreaRef} className={`flex-1 flex-col relative bg-[#333333] ${mobileTab === 'center' ? 'flex' : 'hidden md:flex'}`}>
              {/* Text Editor Layout */}
              {(activeMode === 'Definitions' || activeMode === 'Commands' || activeMode === 'States') && (
                   <div className="flex-1 bg-[#1e1e1e] flex flex-col font-mono text-[11px] overflow-hidden">
@@ -2234,20 +2550,209 @@ export default function MugenStudio() {
                         </div>
                     )}
 
+                    {/* Interactive Palette Overlay (Floating Viewer) */}
+                    {activeMode === 'Sprites' && showPaletteOverlay && (
+                        <motion.div 
+                            drag
+                            dragConstraints={renderAreaRef}
+                            dragMomentum={false}
+                            dragElastic={0}
+                            initial={{ x: 0, y: 0 }}
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            className="absolute bottom-6 left-10 bg-[#151515]/95 border border-[#444] rounded-xl p-4 shadow-2xl z-30 flex flex-col gap-3 min-w-[240px] select-none cursor-default"
+                            style={{ touchAction: 'none' }}
+                        >
+                            {(() => {
+                                const sprite = sffData?.images[selectedSpriteIdx];
+                                
+                                // Hierarchy: Selection > First SFF Pal > loaded ACT > Sprite Local
+                                const selectionPal = sffData?.palettes?.[selectedPaletteIdx];
+                                const firstSffPal = sffData?.palettes && sffData.palettes.length > 0 ? sffData.palettes[0] : null;
+                                
+                                // Source identification
+                                let palSource = "External/Default";
+                                if (selectionPal) palSource = `Selected (${selectionPal.group},${selectionPal.item})`;
+                                else if (firstSffPal) palSource = `First SFF (${firstSffPal.group},${firstSffPal.item})`;
+                                else if (actPalette) palSource = "Loaded .ACT";
+                                else if (sprite?.palette) palSource = `Sprite ${sprite.group},${sprite.image}`;
+
+                                const effectivePalette = selectionPal?.data || firstSffPal?.data || actPalette || sprite?.palette;
+                                
+                                const isPortraitSpecial = sprite?.group >= 9000 || sprite?.isSharedPalette === false;
+                                
+                                return (
+                                    <>
+                                        <div className="flex items-center justify-between border-b border-[#333] pb-2 cursor-move group">
+                                            <div className="flex items-center gap-2">
+                                                <div className="p-1 bg-purple-900/20 rounded group-hover:bg-purple-900/40 transition-colors">
+                                                    <Palette size={14} className="text-purple-400" />
+                                                </div>
+                                                <span className="text-[10px] font-bold text-gray-200 uppercase tracking-wider">Palette Viewer</span>
+                                            </div>
+                                            <div className="flex items-center gap-2 text-[9px] font-mono bg-purple-900/10 px-2 rounded border border-purple-500/10 text-purple-400">
+                                                {palSource}
+                                            </div>
+                                        </div>
+                                        
+                                        <div 
+                                            className="bg-[#0c0c0c] p-2 rounded-lg border border-[#222]"
+                                            onPointerDown={e => e.stopPropagation()}
+                                        >
+                                            <PaletteRenderer 
+                                                act={effectivePalette} 
+                                                selectedColorIdx={selectedPalColorIdx}
+                                                onColorClick={(idx) => setSelectedPalColorIdx(idx)}
+                                            />
+                                        </div>
+
+                                        <div className="flex justify-between items-center px-1" onPointerDown={e => e.stopPropagation()}>
+                                            <div className="flex flex-col">
+                                                <span className="text-[8px] text-gray-500 uppercase font-bold tracking-tighter">Selected Index</span>
+                                                <span className="text-sm font-mono text-blue-400 font-bold leading-none">{selectedPalColorIdx ?? 0}</span>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                {sprite?.palette && (
+                                                    <button 
+                                                        onClick={() => {
+                                                            if (!sffData || !sprite.palette) return;
+                                                            const confirm = window.confirm("Use THIS sprite's local palette as the new master palette for the entire SFF? All other palettes will be deleted.");
+                                                            if (!confirm) return;
+
+                                                            const targetPaletteData = new Uint8Array(sprite.palette);
+
+                                                            const updatedImages = sffData.images.map((img, idx) => {
+                                                                const isPortrait = img.group >= 9000;
+                                                                return {
+                                                                    ...img,
+                                                                    // Use target palette for character sprites, 
+                                                                    palette: (idx === 0 || !isPortrait) ? targetPaletteData : (img.palette || targetPaletteData),
+                                                                    isSharedPalette: (idx === 0 || isPortrait) ? false : true
+                                                                };
+                                                            });
+
+                                                            const unifiedPalettes = [{
+                                                                group: 1,
+                                                                item: 1,
+                                                                data: targetPaletteData
+                                                            }];
+
+                                                            setSffData({
+                                                                ...sffData,
+                                                                images: updatedImages,
+                                                                palettes: unifiedPalettes
+                                                            });
+                                                            setActPalette(new Uint8Array(targetPaletteData));
+                                                            setSelectedPaletteIdx(0);
+                                                        }}
+                                                        className="p-1 px-2 bg-blue-900/30 border border-blue-500/30 hover:bg-blue-900/50 rounded text-[9px] text-blue-200 flex items-center gap-1 transition-all"
+                                                        title="Set this specific sprite's palette as master"
+                                                    >
+                                                        <Zap size={10} />
+                                                        Use Sprite Pal
+                                                    </button>
+                                                )}
+                                                <button 
+                                                    onClick={() => {
+                                                        if (!sffData) return;
+                                                        const confirm = window.confirm("This will apply the current ACTIVE palette (the one you see right now) to ALL sprites and delete all other palettes from the SFF. Proceed?");
+                                                        if (!confirm) return;
+
+                                                        const targetPaletteData = new Uint8Array(effectivePalette);
+
+                                                        const updatedImages = sffData.images.map((img, idx) => {
+                                                            return {
+                                                                ...img,
+                                                                palette: (idx === 0) ? targetPaletteData : undefined,
+                                                                isSharedPalette: (idx === 0) ? false : true
+                                                            };
+                                                        });
+
+                                                        const unifiedPalettes = [{
+                                                            group: 1,
+                                                            item: 1,
+                                                            data: targetPaletteData
+                                                        }];
+
+                                                        setSffData({
+                                                            ...sffData,
+                                                            images: updatedImages,
+                                                            palettes: unifiedPalettes
+                                                        });
+                                                        setActPalette(new Uint8Array(targetPaletteData));
+                                                        setSelectedPaletteIdx(0);
+                                                    }}
+                                                    className="p-1 px-2 bg-purple-900/30 border border-purple-500/30 hover:bg-purple-900/50 rounded text-[9px] text-purple-200 flex items-center gap-1 transition-all"
+                                                    title="Apply currently visible palette to all sprites and remove others"
+                                                >
+                                                    <Zap size={10} />
+                                                    Unify SFF
+                                                </button>
+                                                <button 
+                                                    onClick={() => {
+                                                        const pal = effectivePalette;
+                                                        if (!pal) return;
+                                                        const actBuffer = new Uint8Array(768);
+                                                        for (let i = 0; i < 256; i++) {
+                                                            actBuffer[i * 3] = pal[i * 4];
+                                                            actBuffer[i * 3 + 1] = pal[i * 4 + 1];
+                                                            actBuffer[i * 3 + 2] = pal[i * 4 + 2];
+                                                        }
+                                                        const blob = new Blob([actBuffer], { type: 'application/octet-stream' });
+                                                        const url = URL.createObjectURL(blob);
+                                                        const a = document.createElement('a');
+                                                        a.href = url;
+                                                        
+                                                        // Filename logic
+                                                        let fileName = 'palette_export.act';
+                                                        if (selectionPal) {
+                                                            fileName = `pal_${selectionPal.group}_${selectionPal.item}_select.act`;
+                                                        } else if (firstSffPal) {
+                                                            fileName = `pal_${firstSffPal.group}_${firstSffPal.item}_first.act`;
+                                                        } else if (isPortraitSpecial) {
+                                                            fileName = `pal_${sprite?.group}_${sprite?.image}.act`;
+                                                        }
+                                                        
+                                                        a.download = fileName;
+                                                        a.click();
+                                                    }}
+                                                    className="p-1 px-2 bg-[#222] border border-[#333] hover:bg-[#2a2a2a] rounded text-[9px] text-gray-400 flex items-center gap-1 transition-all"
+                                                >
+                                                    <Download size={10} />
+                                                    Export .act
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </>
+                                );
+                            })()}
+                        </motion.div>
+                    )}
+
                     {sffData ? (
-                        activeMode === 'Sprites' ? (
-                            <FF3SpriteRenderer 
-                                sprite={sffData.images[selectedSpriteIdx]} 
-                                act={actPalette} 
-                                zoom={zoom}
-                                showAxis={showAxis}
-                                pan={pan}
-                                previewOffset={previewOffset}
-                            />
-                        ) : (
+                        activeMode === 'Sprites' ? (() => {
+                            const sprite = sffData.images[selectedSpriteIdx];
+                            
+                            // Hierarchy: Selection > First > External > Internal
+                            const selectionPal = sffData.palettes[selectedPaletteIdx];
+                            const firstSffPal = sffData.palettes.length > 0 ? sffData.palettes[0] : null;
+                            
+                            const effectivePalette = selectionPal?.data || firstSffPal?.data || actPalette || sprite?.palette;
+                            
+                            return (
+                                <FF3SpriteRenderer 
+                                    sprite={sprite} 
+                                    act={effectivePalette} 
+                                    zoom={zoom}
+                                    showAxis={showAxis}
+                                    pan={pan}
+                                    previewOffset={previewOffset}
+                                />
+                            );
+                        })() : (
                             <AnimationStage 
                                 sff={sffData} 
-                                act={actPalette} 
+                                act={sffData.palettes[selectedPaletteIdx]?.data || sffData.palettes[0]?.data || actPalette} 
                                 action={selectedActionId !== null ? airData?.actions[selectedActionId] : null}
                                 frameIndex={currentFrame}
                                 zoom={zoom}
@@ -2432,22 +2937,22 @@ export default function MugenStudio() {
                         </div>
                         <div className="px-3 py-1 flex flex-col flex-1 overflow-y-auto gap-3 text-xs">
                             <PaletteRenderer 
-                                act={actPalette || sffData?.images[selectedSpriteIdx]?.palette} 
+                                act={sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette || sffData?.images[selectedSpriteIdx]?.palette} 
                                 selectedColorIdx={selectedPalColorIdx}
                                 onColorClick={(idx) => setSelectedPalColorIdx(idx)}
                             />
 
-                            {selectedPalColorIdx !== null && (actPalette || sffData?.images[selectedSpriteIdx]?.palette) && (
+                            {selectedPalColorIdx !== null && (sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette || sffData?.images[selectedSpriteIdx]?.palette) && (
                                 <div className="bg-[#242424] p-3 border border-[#3a3a3a] rounded flex flex-col gap-2.5 mt-2 shadow-md">
                                     <div className="text-[10px] font-bold text-blue-400 uppercase tracking-wide border-b border-[#333] pb-1 flex justify-between">
                                         <span>Color Index: #{selectedPalColorIdx}</span>
-                                        <span className="font-mono text-gray-500">HEX: {colorIndexToHex(actPalette || sffData?.images[selectedSpriteIdx]?.palette, selectedPalColorIdx)}</span>
+                                        <span className="font-mono text-gray-500">HEX: {colorIndexToHex(sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette || sffData?.images[selectedSpriteIdx]?.palette, selectedPalColorIdx)}</span>
                                     </div>
 
                                     {/* Color Picker */}
                                     <input
                                         type="color"
-                                        value={colorIndexToHex(actPalette || sffData?.images[selectedSpriteIdx]?.palette, selectedPalColorIdx)}
+                                        value={colorIndexToHex(sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette || sffData?.images[selectedSpriteIdx]?.palette, selectedPalColorIdx)}
                                         onChange={(e) => handleModifyHexColor(e.target.value)}
                                         className="w-full h-10 rounded cursor-pointer"
                                     />
@@ -2545,7 +3050,33 @@ export default function MugenStudio() {
       {showPaletteChoiceModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
             <div className="bg-[#2a2a2a] border border-[#444] rounded-lg shadow-xl w-96 p-6 flex flex-col gap-4">
-                <h2 className="text-lg font-bold text-gray-200">Import Sprite Palette Processing</h2>
+                <div className="flex items-center justify-between">
+                    <h2 className="text-lg font-bold text-gray-200">Import Sprite</h2>
+                    <span className="text-xs bg-blue-900/50 text-blue-300 px-2 py-1 rounded border border-blue-800">
+                        {pendingImportFiles.length} file(s)
+                    </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4 p-3 bg-[#1e1e1e] rounded border border-[#333]">
+                    <div className="flex flex-col gap-1">
+                        <label className="text-[10px] uppercase font-bold text-gray-500">Group</label>
+                        <input 
+                            type="number"
+                            value={importGroup}
+                            onChange={(e) => setImportGroup(parseInt(e.target.value) || 0)}
+                            className="bg-[#252525] border border-[#444] rounded px-2 py-1 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
+                        />
+                    </div>
+                    <div className="flex flex-col gap-1">
+                        <label className="text-[10px] uppercase font-bold text-gray-500">Index</label>
+                        <input 
+                            type="number"
+                            value={importIndex}
+                            onChange={(e) => setImportIndex(parseInt(e.target.value) || 0)}
+                            className="bg-[#252525] border border-[#444] rounded px-2 py-1 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
+                        />
+                    </div>
+                </div>
                 <p className="text-gray-400 text-sm">
                     How would you like to handle the color palette for the imported sprite(s)?
                 </p>
@@ -2663,6 +3194,10 @@ export default function MugenStudio() {
 
 function FF3SpriteRenderer({ sprite, act, zoom, showAxis, pan, previewOffset }: { sprite: any, act: Uint8Array | null, zoom: number, showAxis: boolean, pan?: {x: number, y: number}, previewOffset?: {x: number, y: number} | null }) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    
+    // Priority:
+    // 1. If 'act' is provided (which we've already optimized in the parent to prefer 1,1), use it.
+    // 2. Otherwise use the sprite's own palette.
     const resolvedPalette = act || sprite?.palette;
 
     useEffect(() => {

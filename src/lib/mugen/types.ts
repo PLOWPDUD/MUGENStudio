@@ -15,12 +15,19 @@ export interface SffImage {
   format?: string;
 }
 
+export interface SffPalette {
+  group: number;
+  item: number;
+  data: Uint8Array; // 1024 bytes RGBA
+}
+
 export interface SffData {
   version: string;
   numGroups: number;
   numImages: number;
   images: SffImage[];
   isV2?: boolean;
+  palettes?: SffPalette[];
 }
 
 export interface AirData {

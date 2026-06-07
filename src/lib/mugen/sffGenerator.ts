@@ -63,63 +63,64 @@ export function generateTemplateSff(): Blob {
         spritesInfo.push({ group: g, image: i, w: 60, h: 90, x: 30, y: 90, r: 255, g: 165, b: 0 }); // Orange for hit frames
     }
 
-    // Add portraits at the end (after standard sprites instead of before)
     spritesInfo.push({ group: 9000, image: 0, w: 25, h: 25, x: 0, y: 0, r: 255, g: 0, b: 0 });   // Small portrait (red)
     spritesInfo.push({ group: 9000, image: 1, w: 120, h: 140, x: 0, y: 0, r: 0, g: 0, b: 255 }); // Large portrait (blue)
 
-    const pcxBuffers: Uint8Array[] = [];
-    for (const info of spritesInfo) {
-        pcxBuffers.push(createDummyPcx(info.w, info.h, info.r, info.g, info.b));
+    const masterPalette = new Uint8Array(1024);
+    // Initialize with some default colors for 0-255 indices
+    for (let i = 0; i < 256; i++) {
+        masterPalette[i * 4] = i;
+        masterPalette[i * 4 + 1] = i;
+        masterPalette[i * 4 + 2] = i;
+        masterPalette[i * 4 + 3] = 255;
     }
+    // Color index 11 is used by createDummyPcx for the "solid" parts
+    masterPalette[11 * 4] = 0;
+    masterPalette[11 * 4 + 1] = 255;
+    masterPalette[11 * 4 + 2] = 0;
+    // Transparent index 0
+    masterPalette[0] = 255;
+    masterPalette[1] = 0;
+    masterPalette[2] = 255;
+    masterPalette[3] = 0;
 
-    let totalSize = 512;
-    for (const pcx of pcxBuffers) {
-        totalSize += 32 + pcx.byteLength;
-    }
+    const images = spritesInfo.map((info, idx) => {
+        const pixelIndices = new Uint8Array(info.w * info.h);
+        const colorIndex = 11;
+        for (let y = 0; y < info.h; y++) {
+            for (let x = 0; x < info.w; x++) {
+                if (x === 0 || x === info.w - 1 || y === 0 || y === info.h - 1) {
+                    pixelIndices[y * info.w + x] = 0;
+                } else {
+                    // Use info colors (approximate by index if we wanted to be fancy, but let's keep it simple)
+                    pixelIndices[y * info.w + x] = colorIndex; 
+                }
+            }
+        }
+        return {
+            group: info.group,
+            image: info.image,
+            xOffset: info.x,
+            yOffset: info.y,
+            width: info.w,
+            height: info.h,
+            pixelIndices,
+            palette: (idx === 0) ? masterPalette : undefined,
+            isSharedPalette: (idx === 0) ? false : true,
+            comment: "",
+            format: "PCX" as const,
+            isCompressed: false
+        };
+    });
 
-    const buffer = new Uint8Array(totalSize);
-    const view = new DataView(buffer.buffer);
+    const sffData: any = {
+        version: "1.0",
+        images,
+        palettes: [{ group: 1, item: 1, data: masterPalette }],
+        isV2: false
+    };
 
-    // 1. Signature
-    const encoder = new TextEncoder();
-    buffer.set(encoder.encode("ElecbyteSpr"), 0);
-    buffer[11] = 0;
-
-    // 2. Version: standard MUGEN SFF v1 requires [0, 1, 0, 1] for SFF signature
-    buffer[12] = 0;
-    buffer[13] = 1;
-    buffer[14] = 0;
-    buffer[15] = 1;
-
-    // 3. Stats
-    view.setUint32(16, spritesInfo.length, true);
-    view.setUint32(20, spritesInfo.length, true);
-    view.setUint32(24, 512, true); 
-    view.setUint32(28, 32, true); 
-    view.setUint32(32, 1, true); 
-
-    let currentOffset = 512;
-    for (let i = 0; i < spritesInfo.length; i++) {
-        const info = spritesInfo[i];
-        const pcx = pcxBuffers[i];
-        
-        const nextOffset = (i === spritesInfo.length - 1) ? 0 : currentOffset + 32 + pcx.byteLength;
-
-        // Node Header
-        view.setUint32(currentOffset, nextOffset, true);
-        view.setUint32(currentOffset + 4, pcx.byteLength, true);
-        view.setInt16(currentOffset + 8, info.x, true);
-        view.setInt16(currentOffset + 10, info.y, true);
-        view.setUint16(currentOffset + 12, info.group, true);
-        view.setUint16(currentOffset + 14, info.image, true);
-        view.setUint16(currentOffset + 16, 0, true);
-        view.setUint8(currentOffset + 18, 0);
-        
-        buffer.set(pcx, currentOffset + 32);
-
-        currentOffset = nextOffset;
-    }
-
+    const buffer = buildSffBinary(sffData);
     return new Blob([buffer], { type: 'application/octet-stream' });
 }
 
@@ -183,8 +184,7 @@ export function encodePcx(width: number, height: number, pixelIndices: Uint8Arra
         const palOffset = 128 + rleBytes.length;
         buffer[palOffset] = 12;
         for (let i = 0; i < 256; i++) {
-            const actIndex = 255 - i;
-            const rgbOffset = palOffset + 1 + actIndex * 3;
+            const rgbOffset = palOffset + 1 + i * 3;
             if (palette.length >= 1024) {
                 buffer[rgbOffset] = palette[i * 4];
                 buffer[rgbOffset + 1] = palette[i * 4 + 1];
@@ -226,6 +226,13 @@ export function buildSffBinary(sffData: SffData): ArrayBuffer {
         totalSize += 32 + len;
     }
     
+    // SFFv1: Append a 768-byte palette at the end if the first palette is available
+    const paletteToAppend = sffData.palettes.length > 0 ? sffData.palettes[0].data : null;
+    const hasGlobalPalette = paletteToAppend !== null;
+    if (hasGlobalPalette) {
+        totalSize += 768;
+    }
+    
     const buffer = new Uint8Array(totalSize);
     const view = new DataView(buffer.buffer);
     
@@ -234,7 +241,7 @@ export function buildSffBinary(sffData: SffData): ArrayBuffer {
     buffer.set(encoder.encode("ElecbyteSpr"), 0);
     buffer[11] = 0;
     
-    // 2. Version: standard MUGEN SFF v1 requires [0, 1, 0, 1] for SFF signature
+    // 2. Version: Standard MUGEN SFF v1.0.1.0
     buffer[12] = 0;
     buffer[13] = 1;
     buffer[14] = 0;
@@ -247,7 +254,7 @@ export function buildSffBinary(sffData: SffData): ArrayBuffer {
     view.setUint32(20, images.length, true);
     view.setUint32(24, images.length > 0 ? 512 : 0, true);
     view.setUint32(28, 32, true);
-    view.setUint32(32, 1, true);
+    view.setUint32(32, 1, true); // 1 = Shared Palette Type (Standard for characters)
     
     let currentOffset = 512;
     for (let i = 0; i < images.length; i++) {
@@ -285,6 +292,16 @@ export function buildSffBinary(sffData: SffData): ArrayBuffer {
         }
         
         currentOffset = nextOffset;
+    }
+    
+    // Write global palette at the end for SFFv1 compatibility
+    if (hasGlobalPalette && paletteToAppend) {
+        const palOffset = buffer.byteLength - 768;
+        for (let i = 0; i < 256; i++) {
+            buffer[palOffset + i * 3] = paletteToAppend[i * 4];
+            buffer[palOffset + i * 3 + 1] = paletteToAppend[i * 4 + 1];
+            buffer[palOffset + i * 3 + 2] = paletteToAppend[i * 4 + 2];
+        }
     }
     
     return buffer.buffer;

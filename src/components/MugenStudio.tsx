@@ -122,13 +122,198 @@ export default function MugenStudio({
   const airDataRef = useRef<AirData | null>(null);
   const hasChangedThisStroke = useRef(false);
 
+  interface DrawingLayer {
+    id: string;
+    name: string;
+    visible: boolean;
+    pixelIndices: Uint8Array;
+  }
+
+  const [spriteLayersMap, setSpriteLayersMap] = useState<Record<number, DrawingLayer[]>>({});
+  const [activeLayerIdMap, setActiveLayerIdMap] = useState<Record<number, string>>({});
+  
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [selectionStartPos, setSelectionStartPos] = useState<{ x: number; y: number } | null>(null);
+  const [selectionRect, setSelectionRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  
+  const [objectClipboard, setObjectClipboard] = useState<{
+    width: number;
+    height: number;
+    pixelIndices: Uint8Array;
+  } | null>(null);
+  
+  const [pastedContent, setPastedContent] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    pixelIndices: Uint8Array;
+    active: boolean;
+  } | null>(null);
+
   useEffect(() => { sffDataRef.current = sffData; }, [sffData]);
   useEffect(() => { airDataRef.current = airData; }, [airData]);
 
-  const pushToHistory = (sff?: SffData | null, air?: AirData | null) => {
+  const updateLayersForSprite = (spriteIdx: number, newLayers: DrawingLayer[], currentSff?: SffData | null) => {
+    setSpriteLayersMap(prev => ({
+      ...prev,
+      [spriteIdx]: newLayers
+    }));
+    
+    const activeSff = currentSff !== undefined ? currentSff : sffDataRef.current;
+    if (!activeSff) return;
+    const sprite = activeSff.images[spriteIdx];
+    if (!sprite) return;
+    
+    const expectedSize = sprite.width * sprite.height;
+    const compositeIndices = new Uint8Array(expectedSize);
+    
+    for (let i = 0; i < expectedSize; i++) {
+      let compositeVal = 0;
+      for (let l = 0; l < newLayers.length; l++) {
+        const layer = newLayers[l];
+        if (layer.visible) {
+          const val = layer.pixelIndices[i];
+          if (val !== 0) {
+            compositeVal = val;
+          }
+        }
+      }
+      compositeIndices[i] = compositeVal;
+    }
+    
+    setSffData(prevSff => {
+      if (!prevSff) return prevSff;
+      const nextSff = { ...prevSff, images: [...prevSff.images] };
+      const nextSprite = { ...nextSff.images[spriteIdx], pixelIndices: compositeIndices };
+      nextSff.images[spriteIdx] = nextSprite;
+      sffDataRef.current = nextSff;
+      return nextSff;
+    });
+  };
+
+  const getSpriteLayers = (spriteIdx: number, sprite: any): DrawingLayer[] => {
+    if (!sprite) return [];
+    if (spriteLayersMap[spriteIdx]) {
+      const layers = spriteLayersMap[spriteIdx];
+      const expectedSize = sprite.width * sprite.height;
+      return layers.map(layer => {
+        if (layer.pixelIndices.length !== expectedSize) {
+          const nextIndices = new Uint8Array(expectedSize);
+          const minLen = Math.min(layer.pixelIndices.length, expectedSize);
+          nextIndices.set(layer.pixelIndices.subarray(0, minLen));
+          return { ...layer, pixelIndices: nextIndices };
+        }
+        return layer;
+      });
+    }
+    const initialLayer: DrawingLayer = {
+      id: 'base-' + spriteIdx,
+      name: 'Base Layer',
+      visible: true,
+      pixelIndices: new Uint8Array(sprite.pixelIndices)
+    };
+    return [initialLayer];
+  };
+
+  const getActiveLayerId = (spriteIdx: number, layers: DrawingLayer[]): string => {
+    const customActiveId = activeLayerIdMap[spriteIdx];
+    if (customActiveId && layers.some(l => l.id === customActiveId)) {
+      return customActiveId;
+    }
+    return layers.length > 0 ? layers[layers.length - 1].id : '';
+  };
+
+  const handleCopySelection = () => {
+    if (selectedSpriteIdx === null || !sffData || !selectionRect) return;
+    const sprite = sffData.images[selectedSpriteIdx];
+    if (!sprite) return;
+    
+    const lMap = getSpriteLayers(selectedSpriteIdx, sprite);
+    const actId = getActiveLayerId(selectedSpriteIdx, lMap);
+    const activeLayer = lMap.find(l => l.id === actId) || lMap[0];
+    
+    const { x, y, w, h } = selectionRect;
+    const copiedPixels = new Uint8Array(w * h);
+    for (let r = 0; r < h; r++) {
+      for (let c = 0; c < w; c++) {
+        const srcI = (y + r) * sprite.width + (x + c);
+        copiedPixels[r * w + c] = activeLayer.pixelIndices[srcI];
+      }
+    }
+    
+    setObjectClipboard({
+      width: w,
+      height: h,
+      pixelIndices: copiedPixels
+    });
+  };
+
+  const handlePasteSelection = () => {
+    if (!objectClipboard) return;
+    const startX = selectionRect ? selectionRect.x : 0;
+    const startY = selectionRect ? selectionRect.y : 0;
+    setPastedContent({
+      x: startX,
+      y: startY,
+      width: objectClipboard.width,
+      height: objectClipboard.height,
+      pixelIndices: new Uint8Array(objectClipboard.pixelIndices),
+      active: true
+    });
+  };
+
+  const handleStampPasted = () => {
+    if (!pastedContent || !pastedContent.active || selectedSpriteIdx === null || !sffData) return;
+    const sprite = sffData.images[selectedSpriteIdx];
+    if (!sprite) return;
+    
+    const lMap = getSpriteLayers(selectedSpriteIdx, sprite);
+    const actId = getActiveLayerId(selectedSpriteIdx, lMap);
+    const activeLayerIdx = lMap.findIndex(l => l.id === actId);
+    if (activeLayerIdx === -1) return;
+    
+    const targetLayer = lMap[activeLayerIdx];
+    const nextIndices = new Uint8Array(targetLayer.pixelIndices);
+    
+    const { x: targetX, y: targetY, width: pW, height: pH, pixelIndices: pPixels } = pastedContent;
+    let changed = false;
+    
+    for (let r = 0; r < pH; r++) {
+      for (let c = 0; c < pW; c++) {
+        const px = targetX + c;
+        const py = targetY + r;
+        if (px >= 0 && px < sprite.width && py >= 0 && py < sprite.height) {
+          const i = py * sprite.width + px;
+          const val = pPixels[r * pW + c];
+          if (val !== 0) {
+            nextIndices[i] = val;
+            changed = true;
+          }
+        }
+      }
+    }
+    
+    if (changed) {
+      const nextLayerObj = { ...targetLayer, pixelIndices: nextIndices };
+      const nextLayers = [...lMap];
+      nextLayers[activeLayerIdx] = nextLayerObj;
+      updateLayersForSprite(selectedSpriteIdx, nextLayers);
+      pushToHistory(null, null, { ...spriteLayersMap, [selectedSpriteIdx]: nextLayers });
+    }
+    
+    setPastedContent(null);
+  };
+
+  const handleCancelPasted = () => {
+    setPastedContent(null);
+  };
+
+  const pushToHistory = (sff?: SffData | null, air?: AirData | null, layersMap?: Record<number, DrawingLayer[]> | null) => {
     const newState = {
       sff: sff !== undefined ? sff : sffDataRef.current,
       air: air !== undefined ? air : airDataRef.current,
+      layersMap: layersMap !== undefined ? layersMap : spriteLayersMap,
     };
     
     setHistory(prev => {
@@ -219,6 +404,9 @@ export default function MugenStudio({
       const prev = history[historyIndex - 1];
       setSffData(prev.sff);
       setAirData(prev.air);
+      if (prev.layersMap) {
+        setSpriteLayersMap(prev.layersMap);
+      }
       setHistoryIndex(historyIndex - 1);
     }
   };
@@ -228,6 +416,9 @@ export default function MugenStudio({
       const next = history[historyIndex + 1];
       setSffData(next.sff);
       setAirData(next.air);
+      if (next.layersMap) {
+        setSpriteLayersMap(next.layersMap);
+      }
       setHistoryIndex(historyIndex + 1);
     }
   };
@@ -255,7 +446,7 @@ export default function MugenStudio({
 
   // Selected palette editing states
   const [selectedPalColorIdx, setSelectedPalColorIdx] = useState<number | null>(null);
-  const [spriteSidebarTab, setSpriteSidebarTab] = useState<'gallery' | 'palettes'>('gallery');
+  const [spriteSidebarTab, setSpriteSidebarTab] = useState<'gallery' | 'palettes' | 'layers'>('gallery');
   const [showPaletteOverlay, setShowPaletteOverlay] = useState(true);
   const [newActionIdText, setNewActionIdText] = useState('100');
 
@@ -270,10 +461,14 @@ export default function MugenStudio({
   const [panOrig, setPanOrig] = useState({ x: 0, y: 0 });
   const [pan, setPan] = useState({ x: 0, y: 0 });
 
-  const [activeTool, setActiveTool] = useState<'move' | 'pan' | 'paint' | 'eraser' | 'bucket' | 'wand' | 'clsn_edit'>('move');
+  const [activeTool, setActiveTool] = useState<'move' | 'pan' | 'paint' | 'eraser' | 'bucket' | 'wand' | 'clsn_edit' | 'select'>('move');
   const [brushSize, setBrushSize] = useState<number>(1);
   const [isPaintDragging, setIsPaintDragging] = useState(false);
   const [lastPaintPos, setLastPaintPos] = useState<{x: number, y: number} | null>(null);
+  
+  const [isDraggingPasted, setIsDraggingPasted] = useState(false);
+  const [pastedDragStart, setPastedDragStart] = useState<{ x: number, y: number, origX: number, origY: number } | null>(null);
+
   const [mobileTab, setMobileTab] = useState<'left' | 'center' | 'right'>('center');
   const workspaceRef = useRef<HTMLDivElement>(null);
   const touchStartDistRef = useRef<number | null>(null);
@@ -386,12 +581,28 @@ export default function MugenStudio({
           redo();
         } else if (e.key === 'c') {
           e.preventDefault();
-          if (activeMode === 'Sprites') handleCopySprite();
-          else if (activeMode === 'Animations') handleCopyCLSN();
+          if (activeMode === 'Sprites') {
+            if (activeTool === 'select' && selectionRect) {
+              handleCopySelection();
+            } else {
+              handleCopySprite();
+            }
+          }
+          else if (activeMode === 'Animations') {
+            handleCopyCLSN();
+          }
         } else if (e.key === 'v') {
           e.preventDefault();
-          if (activeMode === 'Sprites') handlePasteSprite();
-          else if (activeMode === 'Animations') handlePasteCLSN();
+          if (activeMode === 'Sprites') {
+            if (objectClipboard) {
+              handlePasteSelection();
+            } else {
+              handlePasteSprite();
+            }
+          }
+          else if (activeMode === 'Animations') {
+            handlePasteCLSN();
+          }
         } else if (e.key === '+') {
           e.preventDefault();
           setZoom(z => Math.min(10, z + 0.5));
@@ -404,13 +615,35 @@ export default function MugenStudio({
           setShowAxis(prev => !prev);
         } else if (e.key.toLowerCase() === 'c') {
           setShowClsn(prev => !prev);
+        } else if (e.key === 'Escape') {
+          setSelectionRect(null);
+          setPastedContent(null);
+        } else if (e.key === 'Enter') {
+          if (pastedContent && pastedContent.active) {
+            e.preventDefault();
+            handleStampPasted();
+          }
+        } else if (pastedContent && pastedContent.active) {
+          if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            setPastedContent(p => p ? { ...p, y: p.y - 1 } : null);
+          } else if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            setPastedContent(p => p ? { ...p, y: p.y + 1 } : null);
+          } else if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            setPastedContent(p => p ? { ...p, x: p.x - 1 } : null);
+          } else if (e.key === 'ArrowRight') {
+            e.preventDefault();
+            setPastedContent(p => p ? { ...p, x: p.x + 1 } : null);
+          }
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo, activeMode, activeTool, sffData, airData, spriteClipboard, clsnClipboard]);
+  }, [undo, redo, activeMode, activeTool, sffData, airData, spriteClipboard, clsnClipboard, selectionRect, objectClipboard, pastedContent, selectedSpriteIdx]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -663,92 +896,89 @@ export default function MugenStudio({
     const y1 = localY;
     
     const colorIdx = activeTool === 'eraser' ? 0 : (selectedPalColorIdx ?? 0);
+
+    const lMap = getSpriteLayers(selectedSpriteIdx, sprite);
+    const actId = getActiveLayerId(selectedSpriteIdx, lMap);
+    const activeLayerIdx = lMap.findIndex(l => l.id === actId);
+    if (activeLayerIdx === -1) return;
     
-    setSffData(prevSff => {
-        if (!prevSff) return prevSff;
-        const currentSprite = prevSff.images[selectedSpriteIdx];
-        if (!currentSprite) return prevSff;
+    const targetLayer = lMap[activeLayerIdx];
+    const nextIndices = new Uint8Array(targetLayer.pixelIndices);
+    let changed = false;
+    
+    if (activeTool === 'paint' || activeTool === 'eraser') {
+        let cx = x0;
+        let cy = y0;
+        const dx = Math.abs(x1 - cx);
+        const dy = -Math.abs(y1 - cy);
+        const sx = cx < x1 ? 1 : -1;
+        const sy = cy < y1 ? 1 : -1;
+        let err = dx + dy;
         
-        const nextSff = { ...prevSff, images: [...prevSff.images] };
-        const nextSprite = { ...currentSprite };
-        const nextIndices = new Uint8Array(currentSprite.pixelIndices);
-        let changed = false;
-        
-        if (activeTool === 'paint' || activeTool === 'eraser') {
-            let cx = x0;
-            let cy = y0;
-            const dx = Math.abs(x1 - cx);
-            const dy = -Math.abs(y1 - cy);
-            const sx = cx < x1 ? 1 : -1;
-            const sy = cy < y1 ? 1 : -1;
-            let err = dx + dy;
-            
-            while (true) {
-                const halfSize = brushSize / 2;
-                const r = Math.floor(halfSize);
-                for (let bdy = -r; bdy <= r; bdy++) {
-                    for (let bdx = -r; bdx <= r; bdx++) {
-                        const distSq = bdx * bdx + bdy * bdy;
-                        if (distSq <= halfSize * halfSize || brushSize === 1) {
-                            const px = cx + bdx;
-                            const py = cy + bdy;
-                            if (px >= 0 && px < currentSprite.width && py >= 0 && py < currentSprite.height) {
-                                const i = py * currentSprite.width + px;
-                                if (nextIndices[i] !== colorIdx) {
-                                    nextIndices[i] = colorIdx;
-                                    changed = true;
-                                }
+        while (true) {
+            const halfSize = brushSize / 2;
+            const r = Math.floor(halfSize);
+            for (let bdy = -r; bdy <= r; bdy++) {
+                for (let bdx = -r; bdx <= r; bdx++) {
+                    const distSq = bdx * bdx + bdy * bdy;
+                    if (distSq <= halfSize * halfSize || brushSize === 1) {
+                        const px = cx + bdx;
+                        const py = cy + bdy;
+                        if (px >= 0 && px < sprite.width && py >= 0 && py < sprite.height) {
+                            const i = py * sprite.width + px;
+                            if (nextIndices[i] !== colorIdx) {
+                                nextIndices[i] = colorIdx;
+                                changed = true;
                             }
                         }
                     }
                 }
-                if (cx === x1 && cy === y1) break;
-                const e2 = 2 * err;
-                if (e2 >= dy) { err += dy; cx += sx; }
-                if (e2 <= dx) { err += dx; cy += sy; }
             }
-        } else if (activeTool === 'wand') {
-            if (localX >= 0 && localX < currentSprite.width && localY >= 0 && localY < currentSprite.height) {
-                const pixelIndex = localY * currentSprite.width + localX;
-                const targetColorIdx = currentSprite.pixelIndices[pixelIndex];
-                if (targetColorIdx !== colorIdx) {
-                    for (let i = 0; i < nextIndices.length; i++) {
-                        if (nextIndices[i] === targetColorIdx) {
-                            nextIndices[i] = colorIdx;
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        } else if (activeTool === 'bucket') {
-            if (localX >= 0 && localX < currentSprite.width && localY >= 0 && localY < currentSprite.height) {
-                const pixelIndex = localY * currentSprite.width + localX;
-                const targetColorIdx = currentSprite.pixelIndices[pixelIndex];
-                if (targetColorIdx !== colorIdx) {
-                    const stack = [[localX, localY]];
-                    while (stack.length > 0) {
-                        const [cx, cy] = stack.pop()!;
-                        if (cx < 0 || cx >= currentSprite.width || cy < 0 || cy >= currentSprite.height) continue;
-                        const i = cy * currentSprite.width + cx;
-                        if (nextIndices[i] === targetColorIdx) {
-                            nextIndices[i] = colorIdx;
-                            stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
-                            changed = true;
-                        }
+            if (cx === x1 && cy === y1) break;
+            const e2 = 2 * err;
+            if (e2 >= dy) { err += dy; cx += sx; }
+            if (e2 <= dx) { err += dx; cy += sy; }
+        }
+    } else if (activeTool === 'wand') {
+        if (localX >= 0 && localX < sprite.width && localY >= 0 && localY < sprite.height) {
+            const pixelIndex = localY * sprite.width + localX;
+            const targetColorIdx = targetLayer.pixelIndices[pixelIndex];
+            if (targetColorIdx !== colorIdx) {
+                for (let i = 0; i < nextIndices.length; i++) {
+                    if (nextIndices[i] === targetColorIdx) {
+                        nextIndices[i] = colorIdx;
+                        changed = true;
                     }
                 }
             }
         }
-        
-        if (changed) {
-            hasChangedThisStroke.current = true;
-            nextSprite.pixelIndices = nextIndices;
-            nextSff.images[selectedSpriteIdx] = nextSprite;
-            sffDataRef.current = nextSff;
-            return nextSff;
+    } else if (activeTool === 'bucket') {
+        if (localX >= 0 && localX < sprite.width && localY >= 0 && localY < sprite.height) {
+            const pixelIndex = localY * sprite.width + localX;
+            const targetColorIdx = targetLayer.pixelIndices[pixelIndex];
+            if (targetColorIdx !== colorIdx) {
+                const stack = [[localX, localY]];
+                while (stack.length > 0) {
+                    const [cx, cy] = stack.pop()!;
+                    if (cx < 0 || cx >= sprite.width || cy < 0 || cy >= sprite.height) continue;
+                    const i = cy * sprite.width + cx;
+                    if (nextIndices[i] === targetColorIdx) {
+                        nextIndices[i] = colorIdx;
+                        stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+                        changed = true;
+                    }
+                }
+            }
         }
-        return prevSff;
-    });
+    }
+    
+    if (changed) {
+        hasChangedThisStroke.current = true;
+        const nextLayerObj = { ...targetLayer, pixelIndices: nextIndices };
+        const nextLayers = [...lMap];
+        nextLayers[activeLayerIdx] = nextLayerObj;
+        updateLayersForSprite(selectedSpriteIdx, nextLayers);
+    }
     
     setLastPaintPos({ x: localX, y: localY });
   };
@@ -764,6 +994,39 @@ export default function MugenStudio({
     hasChangedThisStroke.current = false;
 
     if (activeMode === 'Sprites') {
+      if (!sffData) return;
+      const idx = selectedSpriteIdx !== null ? selectedSpriteIdx : 0;
+      const sprite = sffData.images[idx];
+      if (!sprite) return;
+
+      const rect = workspaceRef.current?.getBoundingClientRect();
+      if (rect) {
+          const clickX = clientX - rect.left - pan.x;
+          const clickY = clientY - rect.top - pan.y;
+          const centerX = rect.width / 2;
+          const centerY = rect.height / 2;
+          const drawX = centerX - sprite.xOffset * zoom;
+          const drawY = centerY - sprite.yOffset * zoom;
+          const localX = Math.floor((clickX - drawX) / zoom);
+          const localY = Math.floor((clickY - drawY) / zoom);
+
+          if (pastedContent && pastedContent.active) {
+              if (localX >= pastedContent.x && localX < pastedContent.x + pastedContent.width &&
+                  localY >= pastedContent.y && localY < pastedContent.y + pastedContent.height) {
+                  setIsDraggingPasted(true);
+                  setPastedDragStart({ x: clientX, y: clientY, origX: pastedContent.x, origY: pastedContent.y });
+                  return;
+              }
+          }
+
+          if (activeTool === 'select') {
+              setIsSelecting(true);
+              setSelectionStartPos({ x: localX, y: localY });
+              setSelectionRect({ x: localX, y: localY, w: 1, h: 1 });
+              return;
+          }
+      }
+
       if (activeTool === 'paint' || activeTool === 'eraser' || activeTool === 'bucket' || activeTool === 'wand') {
           if (activeTool === 'paint' || activeTool === 'eraser') {
               setIsPaintDragging(true);
@@ -772,10 +1035,7 @@ export default function MugenStudio({
           applyPaint(clientX, clientY);
           return;
       }
-      if (!sffData) return;
-      const idx = selectedSpriteIdx !== null ? selectedSpriteIdx : 0;
-      const sprite = sffData.images[idx];
-      if (!sprite) return;
+
       setIsDragging(true);
       setDragStart({ x: clientX, y: clientY });
       setDragOrig({ x: sprite.xOffset, y: sprite.yOffset });
@@ -803,10 +1063,52 @@ export default function MugenStudio({
         return;
     }
 
-    if (activeMode === 'Sprites' && (activeTool === 'paint' || activeTool === 'eraser') && isPaintDragging) {
-        applyPaint(clientX, clientY);
-        return;
+    if (activeMode === 'Sprites') {
+        if (!sffData) return;
+        const idx = selectedSpriteIdx !== null ? selectedSpriteIdx : 0;
+        const sprite = sffData.images[idx];
+        if (!sprite) return;
+
+        const rect = workspaceRef.current?.getBoundingClientRect();
+        if (rect) {
+            const clickX = clientX - rect.left - pan.x;
+            const clickY = clientY - rect.top - pan.y;
+            const centerX = rect.width / 2;
+            const centerY = rect.height / 2;
+            const drawX = centerX - sprite.xOffset * zoom;
+            const drawY = centerY - sprite.yOffset * zoom;
+            const localX = Math.floor((clickX - drawX) / zoom);
+            const localY = Math.floor((clickY - drawY) / zoom);
+
+            if (isDraggingPasted && pastedDragStart) {
+                const deltaX = Math.round((clientX - pastedDragStart.x) / zoom);
+                const deltaY = Math.round((clientY - pastedDragStart.y) / zoom);
+                setPastedContent(prev => prev ? {
+                    ...prev,
+                    x: pastedDragStart.origX + deltaX,
+                    y: pastedDragStart.origY + deltaY
+                } : null);
+                return;
+            }
+
+            if (isSelecting && selectionStartPos) {
+                const xInBounds = Math.max(0, Math.min(sprite.width - 1, localX));
+                const yInBounds = Math.max(0, Math.min(sprite.height - 1, localY));
+                const x = Math.min(selectionStartPos.x, xInBounds);
+                const y = Math.min(selectionStartPos.y, yInBounds);
+                const w = Math.max(1, Math.abs(selectionStartPos.x - xInBounds));
+                const h = Math.max(1, Math.abs(selectionStartPos.y - yInBounds));
+                setSelectionRect({ x, y, w, h });
+                return;
+            }
+        }
+
+        if ((activeTool === 'paint' || activeTool === 'eraser') && isPaintDragging) {
+            applyPaint(clientX, clientY);
+            return;
+        }
     }
+
     if (!isDragging) return;
     if (activeMode === 'Animations' && activeTool === 'clsn_edit') return;
 
@@ -904,6 +1206,14 @@ export default function MugenStudio({
         setIsPanning(false);
     }
     
+    if (isDraggingPasted) {
+        setIsDraggingPasted(false);
+    }
+
+    if (isSelecting) {
+        setIsSelecting(false);
+    }
+
     if (isDragging && previewOffset) {
         if (activeMode === 'Sprites') {
             handleUpdateSprite('xOffset', previewOffset.x);
@@ -1908,9 +2218,16 @@ export default function MugenStudio({
                                 <Palette size={12} />
                                 Palettes
                             </button>
+                            <button 
+                                onClick={() => setSpriteSidebarTab('layers')}
+                                className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all ${spriteSidebarTab === 'layers' ? 'bg-[#333] text-green-400 shadow-sm' : 'text-gray-500 hover:text-gray-300'}`}
+                            >
+                                <Box size={12} />
+                                Layers
+                            </button>
                         </div>
 
-                        {spriteSidebarTab === 'gallery' ? (
+                        {spriteSidebarTab === 'gallery' && (
                             <div className="flex flex-col gap-4">
                                 {/* Sprite Selector */}
                                 <div className="flex justify-between items-center text-gray-300 bg-[#252525] p-2 border border-[#333] rounded shrink-0">
@@ -2024,7 +2341,9 @@ export default function MugenStudio({
                                     </div>
                                 </div>
                             </div>
-                        ) : (
+                        )}
+
+                        {spriteSidebarTab === 'palettes' && (
                             <div className="flex flex-col gap-4">
                                 {/* Palette Selector Header */}
                                 <div className="flex flex-col gap-2 shrink-0">
@@ -2097,6 +2416,298 @@ export default function MugenStudio({
                                              Export Current .ACT
                                          </button>
                                      )}
+                                </div>
+                            </div>
+                        )}
+
+                        {spriteSidebarTab === 'layers' && (
+                            <div className="flex flex-col gap-4 animate-fadeIn">
+                                {/* Layer Controls */}
+                                <div className="flex flex-col gap-2 bg-[#1a1a1a] border border-[#333] rounded-lg p-3">
+                                    <div className="flex items-center justify-between mb-1">
+                                        <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wide">Drawing Layers</span>
+                                        <button
+                                            onClick={() => {
+                                                if (selectedSpriteIdx === null || !sffData) return;
+                                                const sprite = sffData.images[selectedSpriteIdx];
+                                                if (!sprite) return;
+                                                const currentL = getSpriteLayers(selectedSpriteIdx, sprite);
+                                                const newLayer: DrawingLayer = {
+                                                    id: 'layer-' + Date.now(),
+                                                    name: 'Layer ' + (currentL.length + 1),
+                                                    visible: true,
+                                                    pixelIndices: new Uint8Array(sprite.width * sprite.height)
+                                                };
+                                                const nextL = [...currentL, newLayer];
+                                                updateLayersForSprite(selectedSpriteIdx, nextL);
+                                                setActiveLayerIdMap(prev => ({ ...prev, [selectedSpriteIdx]: newLayer.id }));
+                                                pushToHistory();
+                                            }}
+                                            className="px-2 py-1 bg-green-900/40 border border-green-700/80 text-green-400 font-mono text-[10px] font-bold flex items-center gap-1 hover:bg-green-900/60 rounded"
+                                            title="Add New Layer"
+                                        >
+                                            <Plus size={10} /> Add Layer
+                                        </button>
+                                    </div>
+
+                                    {/* Layers List (Top to Bottom rendering) */}
+                                    <div className="flex flex-col gap-1 max-h-48 overflow-y-auto pr-1">
+                                        {(() => {
+                                            if (selectedSpriteIdx === null) return <span className="text-[10px] text-gray-500">Select a sprite.</span>;
+                                            const sprite = sffData?.images[selectedSpriteIdx];
+                                            if (!sprite) return <span className="text-[10px] text-gray-500">No active sprite selected.</span>;
+                                            const layers = getSpriteLayers(selectedSpriteIdx, sprite);
+                                            const activeLayerId = getActiveLayerId(selectedSpriteIdx, layers);
+
+                                            return [...layers].reverse().map((layer, reverseIdx) => {
+                                                const actualIdx = layers.length - 1 - reverseIdx;
+                                                const isActive = layer.id === activeLayerId;
+                                                return (
+                                                    <div
+                                                        key={layer.id}
+                                                        onClick={() => {
+                                                            setActiveLayerIdMap(prev => ({ ...prev, [selectedSpriteIdx]: layer.id }));
+                                                        }}
+                                                        className={`flex items-center justify-between p-2 rounded cursor-pointer transition-colors text-[11px] font-mono border ${
+                                                            isActive
+                                                                ? 'bg-blue-950/40 border-blue-800/80 text-blue-300'
+                                                                : 'bg-[#222] border-[#333] text-gray-400 hover:bg-[#2a2a2a]'
+                                                        }`}
+                                                    >
+                                                        <div className="flex items-center gap-2 truncate">
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    const nextL = [...layers];
+                                                                    nextL[actualIdx] = { ...layer, visible: !layer.visible };
+                                                                    updateLayersForSprite(selectedSpriteIdx, nextL);
+                                                                    pushToHistory();
+                                                                }}
+                                                                className="text-gray-400 hover:text-white"
+                                                                title={layer.visible ? "Hide" : "Show"}
+                                                            >
+                                                                <span className="font-sans text-xs">
+                                                                    {layer.visible ? '👁️' : '❌'}
+                                                                </span>
+                                                            </button>
+                                                            <span className="truncate font-semibold">{layer.name}</span>
+                                                        </div>
+
+                                                        <div className="flex items-center gap-1.5 shrink-0" onClick={e => e.stopPropagation()}>
+                                                            {/* Merge Down */}
+                                                            {actualIdx > 0 && (
+                                                                <button
+                                                                    onClick={() => {
+                                                                        const prevLayer = layers[actualIdx - 1];
+                                                                        const mergedIndices = new Uint8Array(prevLayer.pixelIndices);
+                                                                        for (let i = 0; i < mergedIndices.length; i++) {
+                                                                            if (layer.pixelIndices[i] !== 0) {
+                                                                                mergedIndices[i] = layer.pixelIndices[i];
+                                                                            }
+                                                                        }
+                                                                        const nextL = layers.filter((_, idx) => idx !== actualIdx);
+                                                                        nextL[actualIdx - 1] = {
+                                                                            ...prevLayer,
+                                                                            pixelIndices: mergedIndices,
+                                                                            name: prevLayer.name + ' (Merged)'
+                                                                        };
+                                                                        updateLayersForSprite(selectedSpriteIdx, nextL);
+                                                                        setActiveLayerIdMap(prev => ({ ...prev, [selectedSpriteIdx]: prevLayer.id }));
+                                                                        pushToHistory();
+                                                                    }}
+                                                                    className="px-1 py-0.5 bg-yellow-905/30 text-yellow-400 rounded border border-yellow-700/40 hover:bg-yellow-905/50 text-[9px] font-bold"
+                                                                    title="Merge into layer below"
+                                                                >
+                                                                    Merge
+                                                                </button>
+                                                            )}
+                                                            {/* Duplicate */}
+                                                            <button
+                                                                onClick={() => {
+                                                                    const dupLayer: DrawingLayer = {
+                                                                        id: 'layer-' + Date.now(),
+                                                                        name: layer.name + ' Copy',
+                                                                        visible: true,
+                                                                        pixelIndices: new Uint8Array(layer.pixelIndices)
+                                                                    };
+                                                                    const nextL = [...layers];
+                                                                    nextL.splice(actualIdx + 1, 0, dupLayer);
+                                                                    updateLayersForSprite(selectedSpriteIdx, nextL);
+                                                                    setActiveLayerIdMap(prev => ({ ...prev, [selectedSpriteIdx]: dupLayer.id }));
+                                                                    pushToHistory();
+                                                                }}
+                                                                className="px-1 py-0.5 bg-blue-900/30 text-blue-400 rounded border border-blue-700/40 hover:bg-blue-900/50 text-[9px] font-bold"
+                                                                title="Duplicate Layer"
+                                                            >
+                                                                Copy
+                                                            </button>
+                                                            {/* Delete */}
+                                                            {layers.length > 1 && (
+                                                                <button
+                                                                    onClick={() => {
+                                                                        if (!window.confirm(`Delete layer "${layer.name}"?`)) return;
+                                                                        const nextL = layers.filter((_, idx) => idx !== actualIdx);
+                                                                        const nextActiveId = nextL[Math.max(0, actualIdx - 1)].id;
+                                                                        updateLayersForSprite(selectedSpriteIdx, nextL);
+                                                                        setActiveLayerIdMap(prev => ({ ...prev, [selectedSpriteIdx]: nextActiveId }));
+                                                                        pushToHistory();
+                                                                    }}
+                                                                    className="text-red-400 hover:text-red-300 p-0.5"
+                                                                    title="Delete Layer"
+                                                                >
+                                                                    <Trash2 size={12} />
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            });
+                                        })()}
+                                    </div>
+                                </div>
+
+                                {/* Object Selector & Copy-Paste Tool Box */}
+                                <div className="flex flex-col gap-2.5 bg-[#1a1a1a] border border-[#333] rounded-lg p-3">
+                                    <div className="flex items-center justify-between border-b border-[#333] pb-1.5 mb-1">
+                                        <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wide">Object Selector & Clipboard</span>
+                                        {activeTool === 'select' && (
+                                            <span className="text-[10px] text-blue-400 font-semibold animate-pulse">Select Active</span>
+                                        )}
+                                    </div>
+
+                                    <p className="text-[10px] text-gray-400 leading-relaxed">
+                                        Activate the <strong className="text-blue-400">Select Object Tool</strong> below, then click and drag a rectangle on the sprite canvas to select.
+                                    </p>
+
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={() => setActiveTool('select')}
+                                            className={`flex-1 px-3 py-1.5 border rounded text-[11px] font-bold text-center flex items-center justify-center gap-1.5 transition-colors ${
+                                                activeTool === 'select'
+                                                    ? 'bg-blue-900/40 border-blue-700/80 text-blue-400'
+                                                    : 'bg-[#222] border-[#333] text-gray-300 hover:bg-[#2a2a2a]'
+                                            }`}
+                                        >
+                                            <Square size={12} className={activeTool === 'select' ? "stroke-blue-400" : "stroke-gray-400"} />
+                                            Use Select Tool
+                                        </button>
+                                        
+                                        {selectionRect && (
+                                            <button
+                                                onClick={() => {
+                                                    setSelectionRect(null);
+                                                    setSelectionStartPos(null);
+                                                }}
+                                                className="px-2.5 py-1.5 bg-[#222] border border-[#333] hover:bg-[#2c2c2c] text-gray-400 hover:text-white rounded text-[11px]"
+                                                title="Deselect"
+                                            >
+                                                Clear
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    <div className="bg-[#242424] rounded border border-[#333] p-2 flex flex-col gap-2 mt-1">
+                                        <div className="flex justify-between items-center text-[10px] font-mono text-gray-400">
+                                            <span>Selected Box:</span>
+                                            <span className="text-blue-400 font-semibold">
+                                                {selectionRect
+                                                    ? `${selectionRect.w}x${selectionRect.h} @ (${selectionRect.x}, ${selectionRect.y})`
+                                                    : 'No selection'}
+                                            </span>
+                                        </div>
+
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <button
+                                                onClick={handleCopySelection}
+                                                disabled={!selectionRect}
+                                                className={`px-2 py-1 border rounded text-[11px] font-bold text-center flex items-center justify-center gap-1 transition-all ${
+                                                    selectionRect
+                                                        ? 'bg-blue-900/30 border-blue-800 text-blue-300 hover:bg-blue-900/50'
+                                                        : 'bg-gray-800/10 border-gray-800 text-gray-600 cursor-not-allowed'
+                                                }`}
+                                                title="Copy object in selection to private clipboard (Ctrl+C)"
+                                            >
+                                                <Copy size={11} /> Copy Object
+                                            </button>
+                                            <button
+                                                onClick={handlePasteSelection}
+                                                disabled={!objectClipboard}
+                                                className={`px-2 py-1 border rounded text-[11px] font-bold text-center flex items-center justify-center gap-1 transition-all ${
+                                                    objectClipboard
+                                                        ? 'bg-green-900/30 border-green-800 text-green-300 hover:bg-green-900/50 font-semibold'
+                                                        : 'bg-gray-800/10 border-gray-800 text-gray-600 cursor-not-allowed'
+                                                }`}
+                                                title="Paste copied object onto current active layer (Ctrl+V)"
+                                            >
+                                                <Clipboard size={11} /> Paste Object
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {pastedContent && pastedContent.active && (
+                                        <div className="bg-[#1a2d21] border border-[#2d5c3f] rounded p-2.5 flex flex-col gap-2 animate-fadeIn mt-1">
+                                            <div className="flex justify-between items-center text-[10px] text-green-400 font-bold uppercase font-mono">
+                                                <span>🟢 Floating Paste Object</span>
+                                                <span>{pastedContent.width}x{pastedContent.height}</span>
+                                            </div>
+                                            <p className="text-[10px] text-green-300 leading-normal">
+                                                Drag the object with your mouse on the canvas, or use the nudge buttons below to position!
+                                            </p>
+                                            
+                                            <div className="flex flex-col items-center gap-1">
+                                                <button
+                                                    onClick={() => setPastedContent(p => p ? { ...p, y: p.y - 1 } : null)}
+                                                    className="w-8 h-6 bg-[#20402b] hover:bg-[#2a5439] border border-[#3e7d54] rounded text-emerald-300 text-xs font-bold font-mono"
+                                                    title="Nudge Up or ArrowUp"
+                                                >
+                                                    &uarr;
+                                                </button>
+                                                <div className="flex gap-4">
+                                                    <button
+                                                        onClick={() => setPastedContent(p => p ? { ...p, x: p.x - 1 } : null)}
+                                                        className="w-8 h-6 bg-[#20402b] hover:bg-[#2a5439] border border-[#3e7d54] rounded text-emerald-300 text-xs font-bold font-mono"
+                                                        title="Nudge Left or ArrowLeft"
+                                                    >
+                                                        &larr;
+                                                    </button>
+                                                    <span className="text-[10px] text-emerald-400 font-mono flex items-center justify-center min-w-16 font-semibold bg-[#0f1d14] rounded px-1">
+                                                        ({pastedContent.x}, {pastedContent.y})
+                                                    </span>
+                                                    <button
+                                                        onClick={() => setPastedContent(p => p ? { ...p, x: p.x + 1 } : null)}
+                                                        className="w-8 h-6 bg-[#20402b] hover:bg-[#2a5439] border border-[#3e7d54] rounded text-emerald-300 text-xs font-bold font-mono"
+                                                        title="Nudge Right or ArrowRight"
+                                                    >
+                                                        &rarr;
+                                                    </button>
+                                                </div>
+                                                <button
+                                                    onClick={() => setPastedContent(p => p ? { ...p, y: p.y + 1 } : null)}
+                                                    className="w-8 h-6 bg-[#20402b] hover:bg-[#2a5439] border border-[#3e7d54] rounded text-emerald-300 text-xs font-bold font-mono"
+                                                    title="Nudge Down or ArrowDown"
+                                                >
+                                                    &darr;
+                                                </button>
+                                            </div>
+
+                                            <div className="grid grid-cols-2 gap-2 mt-1">
+                                                <button
+                                                    onClick={handleStampPasted}
+                                                    className="px-2 py-1 bg-green-600 hover:bg-green-500 text-white rounded text-[11px] font-bold text-center border border-green-500 shadow-sm"
+                                                    title="Commit pixels down onto active layer (Enter)"
+                                                >
+                                                    Stamp Down
+                                                </button>
+                                                <button
+                                                    onClick={handleCancelPasted}
+                                                    className="px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-[11px] text-center border border-gray-600"
+                                                    title="Cancel Paste (Esc)"
+                                                >
+                                                    Cancel
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         )}
@@ -3173,6 +3784,8 @@ export default function MugenStudio({
                                     showAxis={showAxis}
                                     pan={pan}
                                     previewOffset={previewOffset}
+                                    selectionRect={selectionRect}
+                                    pastedContent={pastedContent}
                                 />
                             );
                         })() : (
@@ -3625,7 +4238,7 @@ export default function MugenStudio({
   );
 }
 
-function FF3SpriteRenderer({ sprite, act, zoom, showAxis, pan, previewOffset }: { sprite: any, act: Uint8Array | null, zoom: number, showAxis: boolean, pan?: {x: number, y: number}, previewOffset?: {x: number, y: number} | null }) {
+function FF3SpriteRenderer({ sprite, act, zoom, showAxis, pan, previewOffset, selectionRect, pastedContent }: { sprite: any, act: Uint8Array | null, zoom: number, showAxis: boolean, pan?: {x: number, y: number}, previewOffset?: {x: number, y: number} | null, selectionRect?: { x: number, y: number, w: number, h: number } | null, pastedContent?: { x: number, y: number, width: number, height: number, pixelIndices: Uint8Array, active: boolean } | null }) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     
     // Priority:
@@ -3665,6 +4278,56 @@ function FF3SpriteRenderer({ sprite, act, zoom, showAxis, pan, previewOffset }: 
                 } catch(e) {}
             }
 
+            if (sprite && selectionRect) {
+                const xOff = previewOffset ? previewOffset.x : sprite.xOffset;
+                const yOff = previewOffset ? previewOffset.y : sprite.yOffset;
+                const recX = centerX - (xOff * zoom) + (selectionRect.x * zoom) + panX;
+                const recY = centerY - (yOff * zoom) + (selectionRect.y * zoom) + panY;
+                const recW = selectionRect.w * zoom;
+                const recH = selectionRect.h * zoom;
+                
+                ctx.save();
+                ctx.strokeStyle = '#3b82f6';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([4, 4]);
+                ctx.strokeRect(recX, recY, recW, recH);
+                ctx.fillStyle = 'rgba(59, 130, 246, 0.15)';
+                ctx.fillRect(recX, recY, recW, recH);
+                ctx.restore();
+            }
+
+            if (sprite && pastedContent && pastedContent.active && resolvedPalette) {
+                try {
+                    const tempCanvas = document.createElement('canvas');
+                    tempCanvas.width = pastedContent.width;
+                    tempCanvas.height = pastedContent.height;
+                    const tempCtx = tempCanvas.getContext('2d');
+                    if (tempCtx) {
+                        const imgData = applyPalette(pastedContent.pixelIndices, pastedContent.width, pastedContent.height, resolvedPalette);
+                        tempCtx.putImageData(imgData, 0, 0);
+                        
+                        const xOff = previewOffset ? previewOffset.x : sprite.xOffset;
+                        const yOff = previewOffset ? previewOffset.y : sprite.yOffset;
+                        const pX = centerX - (xOff * zoom) + (pastedContent.x * zoom) + panX;
+                        const pY = centerY - (yOff * zoom) + (pastedContent.y * zoom) + panY;
+                        const pW = pastedContent.width * zoom;
+                        const pH = pastedContent.height * zoom;
+                        
+                        ctx.imageSmoothingEnabled = false;
+                        ctx.drawImage(tempCanvas, pX, pY, pW, pH);
+                        
+                        ctx.save();
+                        ctx.strokeStyle = '#10b981';
+                        ctx.lineWidth = 1.5;
+                        ctx.setLineDash([4, 4]);
+                        ctx.strokeRect(pX, pY, pW, pH);
+                        ctx.fillStyle = 'rgba(16, 185, 129, 0.05)';
+                        ctx.fillRect(pX, pY, pW, pH);
+                        ctx.restore();
+                    }
+                } catch(e) {}
+            }
+
             if (showAxis) {
                 ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
                 ctx.lineWidth = 1;
@@ -3681,7 +4344,7 @@ function FF3SpriteRenderer({ sprite, act, zoom, showAxis, pan, previewOffset }: 
         window.addEventListener('resize', handleResize);
         return () => window.removeEventListener('resize', handleResize);
 
-    }, [sprite, resolvedPalette, zoom, showAxis, pan, previewOffset]);
+    }, [sprite, resolvedPalette, zoom, showAxis, pan, previewOffset, selectionRect, pastedContent]);
 
     return (
         <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none" />

@@ -487,10 +487,13 @@ export default function MugenStudio({
   const [exportZipIncludeAct, setExportZipIncludeAct] = useState(true);
   const [exportZipIncludeSnd, setExportZipIncludeSnd] = useState(true);
   const [isExportingZip, setIsExportingZip] = useState(false);
+  const [selectedSpriteIndices, setSelectedSpriteIndices] = useState<Set<number>>(new Set());
+  const [isReplacing, setIsReplacing] = useState(false);
 
   // Input refs
   const fileInputRef = useRef<HTMLInputElement>(null);
   const spritePngInputRef = useRef<HTMLInputElement>(null);
+  const replaceSpriteInputRef = useRef<HTMLInputElement>(null);
   const addSoundInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -761,6 +764,7 @@ export default function MugenStudio({
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
     
+    setIsReplacing(false);
     // Read files immediately to avoid expiration of references
     const bufferedFiles = await Promise.all(
       files.map(async (f: File) => ({
@@ -784,18 +788,46 @@ export default function MugenStudio({
     if (spritePngInputRef.current) spritePngInputRef.current.value = '';
   };
 
+  const handleReplaceSpriteFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    
+    if (selectedSpriteIndices.size === 0) {
+        alert("Please select at least one sprite to replace.");
+        return;
+    }
+
+    setIsReplacing(true);
+    const bufferedFiles = await Promise.all(
+      files.map(async (f: File) => ({
+        file: f,
+        buffer: await f.arrayBuffer()
+      }))
+    );
+
+    setPendingImportFiles(bufferedFiles);
+    setShowPaletteChoiceModal(true);
+    if (replaceSpriteInputRef.current) replaceSpriteInputRef.current.value = '';
+  };
+
   const processSpriteImport = async (mode: 'image_palette' | 'adapt' | 'exchange') => {
     setShowPaletteChoiceModal(false);
     if (pendingImportFiles.length === 0) return;
 
     let currentSff = sffData;
     let currentGlobalPal = actPalette;
+    
+    const replacementIndices: number[] = isReplacing ? Array.from(selectedSpriteIndices).map(Number).sort((a, b) => a - b) : [];
+    let replacementHead = 0;
+
     let currentG = importGroup;
     let currentI = importIndex;
 
     const newImages = currentSff ? [...currentSff.images] : [];
 
     for (const item of pendingImportFiles) {
+      if (isReplacing && replacementHead >= replacementIndices.length) break;
+
       const blob = new Blob([item.buffer]);
       const url = URL.createObjectURL(blob);
       
@@ -825,21 +857,37 @@ export default function MugenStudio({
              setActPalette(palette);
           }
 
-          const newSprite: any = {
-            group: currentG,
-            image: currentI,
-            xOffset: Math.round(img.width / 2),
-            yOffset: Math.round(img.height / 2),
-            width: img.width,
-            height: img.height,
-            pixelIndices: indices,
-            isSharedPalette: mode !== 'image_palette',
-            comment: item.file.name,
-            palette: mode === 'image_palette' ? palette : (mode === 'exchange' ? palette : null)
-          };
-
-          newImages.push(newSprite);
-          currentI++;
+          if (isReplacing) {
+            const idxToReplace = replacementIndices[replacementHead];
+            const originalSprite = newImages[idxToReplace];
+            
+            const newSprite: any = {
+              ...originalSprite,
+              width: img.width,
+              height: img.height,
+              pixelIndices: indices,
+              isSharedPalette: mode !== 'image_palette',
+              comment: item.file.name,
+              palette: mode === 'image_palette' ? palette : (mode === 'exchange' ? palette : null)
+            };
+            newImages[idxToReplace] = newSprite;
+            replacementHead++;
+          } else {
+            const newSprite: any = {
+              group: currentG,
+              image: currentI,
+              xOffset: Math.round(img.width / 2),
+              yOffset: Math.round(img.height / 2),
+              width: img.width,
+              height: img.height,
+              pixelIndices: indices,
+              isSharedPalette: mode !== 'image_palette',
+              comment: item.file.name,
+              palette: mode === 'image_palette' ? palette : (mode === 'exchange' ? palette : null)
+            };
+            newImages.push(newSprite);
+            currentI++;
+          }
           URL.revokeObjectURL(url);
           resolve();
         };
@@ -852,23 +900,32 @@ export default function MugenStudio({
     }
 
     if (currentSff) {
-      setSffData({
+      const nextSff = {
         ...currentSff,
         numImages: newImages.length,
         images: newImages
-      });
-      setSelectedSpriteIdx(newImages.length - 1);
+      };
+      setSffData(nextSff);
+      if (isReplacing) {
+        setSelectedSpriteIdx(replacementIndices[0]);
+      } else {
+        setSelectedSpriteIdx(newImages.length - 1);
+      }
+      pushToHistory(nextSff);
     } else {
-      setSffData({
+      const nextSff = {
         version: 'ElecbyteSpr\x00',
-        numGroups: 1, // Will be recalculated or handled by parser
+        numGroups: 1, 
         numImages: newImages.length,
         images: newImages
-      });
+      } as SffData;
+      setSffData(nextSff);
       setSelectedSpriteIdx(0);
+      pushToHistory(nextSff);
     }
 
     setPendingImportFiles([]);
+    setIsReplacing(false);
   };
 
   const applyPaint = (clientX: number, clientY: number) => {
@@ -1966,6 +2023,144 @@ export default function MugenStudio({
     }
   };
 
+  const handleExportSpritePng = async (idx: number) => {
+    if (!sffData) return;
+    const img = sffData.images[idx];
+    if (!img) return;
+
+    // Determine the relevant palette (use provided sprite palette or global actPalette)
+    const palette = actPalette || img.palette || sffData.images[0]?.palette;
+    if (!palette) {
+        alert("No palette found for this sprite. Please load an .ACT file first.");
+        return;
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = img.width;
+    canvas.height = img.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const imageData = applyPalette(img.pixelIndices, img.width, img.height, palette);
+    ctx.putImageData(imageData, 0, 0);
+
+    const blob = await new Promise<Blob | null>(res => canvas.toBlob(res, 'image/png'));
+    if (!blob) return;
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sprite_${img.group}_${img.image}_${idx}.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportAllSpritesZip = async () => {
+    if (!sffData || sffData.images.length === 0) return;
+    setIsExportingZip(true);
+    try {
+      const zip = new JSZip();
+      for (let i = 0; i < sffData.images.length; i++) {
+        const img = sffData.images[i];
+        const palette = actPalette || img.palette || sffData.images[0]?.palette;
+        if (!palette) continue;
+
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) continue;
+
+        const imageData = applyPalette(img.pixelIndices, img.width, img.height, palette);
+        ctx.putImageData(imageData, 0, 0);
+
+        // Convert canvas to data URL then to base64 for JSZip
+        const dataUrl = canvas.toDataURL('image/png');
+        const b64Data = dataUrl.replace(/^data:image\/png;base64,/, "");
+        zip.file(`sprite_${img.group}_${img.image}_${i}.png`, b64Data, { base64: true });
+      }
+
+      const content = await zip.generateAsync({ type: "blob" });
+      const url = URL.createObjectURL(content);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `all_sprites_${Date.now()}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert("Failed to export sprites ZIP: " + err.message);
+    } finally {
+      setIsExportingZip(false);
+    }
+  };
+
+  const handleExportSelectedSpritesZip = async () => {
+    if (!sffData || selectedSpriteIndices.size === 0) return;
+    setIsExportingZip(true);
+    try {
+      const zip = new JSZip();
+      const indices = Array.from(selectedSpriteIndices).sort((a: number, b: number) => a - b);
+      
+      for (const i of indices) {
+        const img = sffData.images[i];
+        if (!img) continue;
+        const palette = actPalette || img.palette || sffData.images[0]?.palette;
+        if (!palette) continue;
+
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) continue;
+
+        const imageData = applyPalette(img.pixelIndices, img.width, img.height, palette);
+        ctx.putImageData(imageData, 0, 0);
+
+        const dataUrl = canvas.toDataURL('image/png');
+        const b64Data = dataUrl.replace(/^data:image\/png;base64,/, "");
+        zip.file(`sprite_${img.group}_${img.image}_${i}.png`, b64Data, { base64: true });
+      }
+
+      const content = await zip.generateAsync({ type: "blob" });
+      const url = URL.createObjectURL(content);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `selected_sprites_${Date.now()}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert("Failed to export selected sprites ZIP: " + err.message);
+    } finally {
+      setIsExportingZip(false);
+    }
+  };
+
+  const toggleSpriteSelection = (idx: number) => {
+    setSelectedSpriteIndices(prev => {
+        const next = new Set(prev);
+        if (next.has(idx)) next.delete(idx);
+        else next.add(idx);
+        return next;
+    });
+  };
+
+  const selectAllSprites = () => {
+    if (!sffData) return;
+    const all = new Set<number>();
+    for (let i = 0; i < sffData.images.length; i++) all.add(i);
+    setSelectedSpriteIndices(all);
+  };
+
+  const deselectAllSprites = () => {
+    setSelectedSpriteIndices(new Set());
+  };
+
   return (
     <div className="flex h-screen w-full flex-col font-sans text-white text-xs select-none" style={{ backgroundColor: '#2a2a2a' }}>
       <input type="file" ref={fileInputRef} multiple accept=".def,.cns,.st,.cmd,.sff,.act,.air,.snd,.wav,.mp3" onChange={handleFileUpload} className="hidden" />
@@ -2231,9 +2426,18 @@ export default function MugenStudio({
                             <div className="flex flex-col gap-4">
                                 {/* Sprite Selector */}
                                 <div className="flex justify-between items-center text-gray-300 bg-[#252525] p-2 border border-[#333] rounded shrink-0">
-                                     <button className="px-2 py-0.5 hover:bg-[#444] rounded text-blue-400 font-bold" onClick={() => setSelectedSpriteIdx(Math.max(0, (selectedSpriteIdx || 0) - 1))}>&larr;</button>
-                                     <span className="font-mono text-[11px]">No. {selectedSpriteIdx !== null ? selectedSpriteIdx + 1 : 0} / {sffData.numImages}</span>
-                                     <button className="px-2 py-0.5 hover:bg-[#444] rounded text-blue-400 font-bold" onClick={() => setSelectedSpriteIdx(Math.min(sffData.numImages - 1, (selectedSpriteIdx || 0) + 1))}>&rarr;</button>
+                                     <div className="flex items-center gap-1">
+                                        <button className="px-2 py-0.5 hover:bg-[#444] rounded text-blue-400 font-bold" onClick={() => setSelectedSpriteIdx(Math.max(0, (selectedSpriteIdx || 0) - 1))}>&larr;</button>
+                                        <span className="font-mono text-[11px]">No. {selectedSpriteIdx !== null ? selectedSpriteIdx + 1 : 0} / {sffData.numImages}</span>
+                                        <button className="px-2 py-0.5 hover:bg-[#444] rounded text-blue-400 font-bold" onClick={() => setSelectedSpriteIdx(Math.min(sffData.numImages - 1, (selectedSpriteIdx || 0) + 1))}>&rarr;</button>
+                                     </div>
+                                     <button 
+                                        className="p-1 hover:bg-[#444] rounded text-emerald-400" 
+                                        onClick={() => selectedSpriteIdx !== null && handleExportSpritePng(selectedSpriteIdx)}
+                                        title="Export selected sprite as PNG"
+                                     >
+                                        <Download size={14} />
+                                     </button>
                                 </div>
 
                                 {/* Import/Delete/Duplicate Tools */}
@@ -2248,6 +2452,19 @@ export default function MugenStudio({
                                             Import
                                         </button>
                                         <button 
+                                            onClick={() => replaceSpriteInputRef.current?.click()}
+                                            disabled={selectedSpriteIndices.size === 0}
+                                            className={`px-3 py-1.5 border rounded font-bold text-center flex items-center justify-center gap-1.5 transition-all ${
+                                                selectedSpriteIndices.size > 0 
+                                                ? 'bg-amber-900/40 border-amber-700/80 text-amber-400 hover:bg-amber-900/60' 
+                                                : 'bg-zinc-900/40 border-zinc-800 text-zinc-600 grayscale cursor-not-allowed'
+                                            }`}
+                                            title="Replace selected sprites with new images (keeps group/index)"
+                                        >
+                                            <Upload size={12} />
+                                            Replace
+                                        </button>
+                                        <button 
                                             onClick={handleDeleteSprite}
                                             className="px-3 py-1.5 bg-red-955/40 border border-red-800/80 rounded hover:bg-red-955/60 text-red-400 font-bold text-center flex items-center justify-center gap-1.5"
                                             title="Delete active sprite from sheet"
@@ -2255,19 +2472,48 @@ export default function MugenStudio({
                                             <Minus size={12} />
                                             Delete
                                         </button>
+                                        <button 
+                                            onClick={handleDuplicateSprite}
+                                            className="px-3 py-1.5 bg-blue-900/40 border border-blue-700/80 rounded hover:bg-blue-900/60 text-blue-400 font-bold text-center flex items-center justify-center gap-1.5"
+                                            title="Duplicate active sprite (Index + 1)"
+                                        >
+                                            <Copy size={12} />
+                                            Clone
+                                        </button>
                                     </div>
                                     <button 
-                                        onClick={handleDuplicateSprite}
-                                        className="px-3 py-1.5 bg-blue-900/40 border border-blue-700/80 rounded hover:bg-blue-900/60 text-blue-400 font-bold text-center flex items-center justify-center gap-1.5"
-                                        title="Duplicate active sprite (Index + 1)"
+                                        onClick={handleExportAllSpritesZip}
+                                        className="px-3 py-1.5 bg-zinc-800 border border-[#444] rounded hover:bg-zinc-700 text-zinc-300 font-bold text-center flex items-center justify-center gap-1.5"
+                                        title="Export all sprites as a ZIP package of PNGs"
                                     >
-                                        <Copy size={12} />
-                                        Duplicate Sprite
+                                        <Download size={12} />
+                                        Export All (.ZIP)
+                                    </button>
+                                    <button 
+                                        onClick={handleExportSelectedSpritesZip}
+                                        disabled={selectedSpriteIndices.size === 0}
+                                        className={`px-3 py-1.5 border rounded font-bold text-center flex items-center justify-center gap-1.5 transition-all ${
+                                            selectedSpriteIndices.size > 0 
+                                            ? 'bg-blue-900/40 border-blue-700/80 text-blue-400 hover:bg-blue-900/60' 
+                                            : 'bg-zinc-900/40 border-zinc-800 text-zinc-600 grayscale cursor-not-allowed'
+                                        }`}
+                                        title="Export only selected sprites as a ZIP package of PNGs"
+                                    >
+                                        <Download size={12} />
+                                        Export Selected ({selectedSpriteIndices.size})
                                     </button>
                                     <input 
                                         type="file" 
                                         ref={spritePngInputRef} 
                                         onChange={handleImportSpriteFile} 
+                                        accept="image/png, image/jpeg" 
+                                        className="hidden" 
+                                    />
+                                    <input 
+                                        type="file" 
+                                        ref={replaceSpriteInputRef} 
+                                        onChange={handleReplaceSpriteFiles} 
+                                        multiple
                                         accept="image/png, image/jpeg" 
                                         className="hidden" 
                                     />
@@ -2311,12 +2557,18 @@ export default function MugenStudio({
                                     </div>
                                 </div>
 
-                                {/* Search and Gallery */}
-                                <div className="flex flex-col gap-2">
-                                    <span className="text-[10px] text-gray-400 font-semibold border-b border-[#333] pb-1">Filter / Find Sprite:</span>
+                                 {/* Search and Gallery */}
+                                 <div className="flex flex-col gap-2">
+                                    <div className="flex items-center justify-between border-b border-[#333] pb-1">
+                                        <span className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Sprite Library</span>
+                                        <div className="flex gap-2">
+                                            <button onClick={selectAllSprites} className="text-[9px] text-blue-400 hover:underline">All</button>
+                                            <button onClick={deselectAllSprites} className="text-[9px] text-gray-500 hover:underline">None</button>
+                                        </div>
+                                    </div>
                                     <input 
                                         type="text"
-                                        placeholder="Search by group indices..."
+                                        placeholder="Search by group index..."
                                         className="bg-[#2a2a2a] border border-[#3a3a3a] w-full px-2 py-1 outline-none text-gray-300 rounded text-xs"
                                         value={spriteSearch}
                                         onChange={e => setSpriteSearch(e.target.value)}
@@ -2327,14 +2579,30 @@ export default function MugenStudio({
                                         {sffData.images.map((img, i) => {
                                             const searchMatches = spriteSearch === '' || img.group.toString().includes(spriteSearch);
                                             if (!searchMatches) return null;
+                                            const isSelected = selectedSpriteIndices.has(i);
                                             return (
                                                 <div 
                                                     key={i}
                                                     onClick={() => setSelectedSpriteIdx(i)}
-                                                    className={`flex items-center justify-between p-1 rounded cursor-pointer hover:bg-[#333] ${selectedSpriteIdx === i ? 'bg-blue-900/40 text-blue-400 text-bold border-l-2 border-blue-500' : 'text-gray-400'}`}
+                                                    className={`flex items-center justify-between p-1 rounded cursor-pointer hover:bg-[#333] group transition-all ${selectedSpriteIdx === i ? 'bg-blue-900/40 text-blue-400 text-bold border-l-2 border-blue-500' : 'text-gray-400'}`}
                                                 >
-                                                    <span>SFF Image index {i}</span>
-                                                    <span className="font-mono text-[10px]">{img.group},{img.image}</span>
+                                                    <div className="flex items-center gap-2 overflow-hidden">
+                                                        <div 
+                                                            onClick={(e) => { e.stopPropagation(); toggleSpriteSelection(i); }}
+                                                            className={`w-3 h-3 border rounded-sm flex items-center justify-center transition-colors shrink-0 ${isSelected ? 'bg-blue-500 border-blue-400' : 'border-gray-600 bg-black/20 group-hover:border-gray-400'}`}
+                                                        >
+                                                            {isSelected && <div className="w-1.5 h-1.5 bg-white rounded-full" />}
+                                                        </div>
+                                                        <span className="truncate">SFF Image index {i}</span>
+                                                        <span className="font-mono text-[10px] opacity-70 shrink-0">({img.group},{img.image})</span>
+                                                    </div>
+                                                    <button 
+                                                        onClick={(e) => { e.stopPropagation(); handleExportSpritePng(i); }}
+                                                        className="opacity-0 group-hover:opacity-100 p-0.5 hover:text-emerald-400 transition-opacity shrink-0"
+                                                        title="Export as PNG"
+                                                    >
+                                                        <Download size={10} />
+                                                    </button>
                                                 </div>
                                             );
                                         })}
@@ -4097,32 +4365,40 @@ export default function MugenStudio({
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
             <div className="bg-[#2a2a2a] border border-[#444] rounded-lg shadow-xl w-96 p-6 flex flex-col gap-4">
                 <div className="flex items-center justify-between">
-                    <h2 className="text-lg font-bold text-gray-200">Import Sprite</h2>
+                    <h2 className="text-lg font-bold text-gray-200">{isReplacing ? 'Replace Sprites' : 'Import Sprite'}</h2>
                     <span className="text-xs bg-blue-900/50 text-blue-300 px-2 py-1 rounded border border-blue-800">
                         {pendingImportFiles.length} file(s)
                     </span>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4 p-3 bg-[#1e1e1e] rounded border border-[#333]">
-                    <div className="flex flex-col gap-1">
-                        <label className="text-[10px] uppercase font-bold text-gray-500">Group</label>
-                        <input 
-                            type="number"
-                            value={importGroup}
-                            onChange={(e) => setImportGroup(parseInt(e.target.value) || 0)}
-                            className="bg-[#252525] border border-[#444] rounded px-2 py-1 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
-                        />
+                {!isReplacing && (
+                    <div className="grid grid-cols-2 gap-4 p-3 bg-[#1e1e1e] rounded border border-[#333]">
+                        <div className="flex flex-col gap-1">
+                            <label className="text-[10px] uppercase font-bold text-gray-500">Group</label>
+                            <input 
+                                type="number"
+                                value={importGroup}
+                                onChange={(e) => setImportGroup(parseInt(e.target.value) || 0)}
+                                className="bg-[#252525] border border-[#444] rounded px-2 py-1 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
+                            />
+                        </div>
+                        <div className="flex flex-col gap-1">
+                            <label className="text-[10px] uppercase font-bold text-gray-500">Index</label>
+                            <input 
+                                type="number"
+                                value={importIndex}
+                                onChange={(e) => setImportIndex(parseInt(e.target.value) || 0)}
+                                className="bg-[#252525] border border-[#444] rounded px-2 py-1 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
+                            />
+                        </div>
                     </div>
-                    <div className="flex flex-col gap-1">
-                        <label className="text-[10px] uppercase font-bold text-gray-500">Index</label>
-                        <input 
-                            type="number"
-                            value={importIndex}
-                            onChange={(e) => setImportIndex(parseInt(e.target.value) || 0)}
-                            className="bg-[#252525] border border-[#444] rounded px-2 py-1 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
-                        />
-                    </div>
-                </div>
+                )}
+                
+                {isReplacing && (
+                    <p className="text-amber-400/90 text-[11px] bg-amber-900/20 p-2 rounded border border-amber-800/30">
+                        Replacing {Math.min(pendingImportFiles.length, selectedSpriteIndices.size)} selected sprite(s). Original Group/Index/Offsets will be preserved.
+                    </p>
+                )}
                 <p className="text-gray-400 text-sm">
                     How would you like to handle the color palette for the imported sprite(s)?
                 </p>

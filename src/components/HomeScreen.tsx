@@ -1,5 +1,6 @@
 import React from 'react';
 import { motion } from 'motion/react';
+import { useTranslation } from 'react-i18next';
 import { 
   Plus, 
   Upload, 
@@ -9,6 +10,7 @@ import {
   Github,
   Zap
 } from 'lucide-react';
+import { LanguagePicker } from './LanguagePicker';
 
 interface HomeScreenProps {
   onNewProject: () => void;
@@ -23,6 +25,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   onImportFolder,
   onShowDocs
 }) => {
+  const { t } = useTranslation();
   const zipInputRef = React.useRef<HTMLInputElement>(null);
   const folderInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -40,6 +43,9 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
 
   return (
     <div className="min-h-screen bg-[#0a0a0c] text-zinc-100 font-sans selection:bg-purple-500/30">
+      <div className="absolute top-4 right-4 z-50">
+        <LanguagePicker />
+      </div>
       <input 
         type="file" 
         ref={zipInputRef} 
@@ -71,7 +77,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
             <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-purple-500/20">
               <Box className="w-6 h-6 text-white" strokeWidth={2.5} />
             </div>
-            <h1 className="text-2xl font-bold tracking-tight text-white">MUGENStudio</h1>
+            <h1 className="text-2xl font-bold tracking-tight text-white">{t('studio.title')}</h1>
           </motion.div>
           
           <motion.div
@@ -80,10 +86,14 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
             transition={{ delay: 0.1 }}
           >
             <h2 className="text-5xl lg:text-7xl font-bold tracking-tighter mb-6 bg-gradient-to-b from-white to-zinc-400 bg-clip-text text-transparent">
-              Build legacy characters <br />with modern tools.
+               {t('home.tagline').split(' ').map((word, i, arr) => (
+                 <React.Fragment key={i}>
+                   {word}{i === Math.floor(arr.length / 2) - 1 ? <br /> : ' '}
+                 </React.Fragment>
+               ))}
             </h2>
             <p className="text-xl text-zinc-400 max-w-2xl leading-relaxed">
-              A high-performance sprite editor, animation sequencer, and character creation suite for the M.U.G.E.N engine.
+              {t('home.description')}
             </p>
           </motion.div>
         </header>
@@ -91,23 +101,23 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
         {/* Action Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-24">
           <ActionCard 
-            title="New Character"
-            description="Start from scratch with a clean workspace and standard character template."
+            title={t('home.newCharacter.title')}
+            description={t('home.newCharacter.description')}
             icon={<Plus className="w-6 h-6" />}
             onClick={onNewProject}
             delay={0.2}
             primary
           />
           <ActionCard 
-            title="Open Project"
-            description="Import a .ZIP archive containing SFF, AIR, and ACT files to continue editing."
+            title={t('home.openProject.title')}
+            description={t('home.openProject.description')}
             icon={<Upload className="w-6 h-6" />}
             onClick={() => zipInputRef.current?.click()}
             delay={0.3}
           />
           <ActionCard 
-            title="Import Folder"
-            description="Load a local directory containing your character source assets."
+            title={t('home.importFolder.title')}
+            description={t('home.importFolder.description')}
             icon={<FolderOpen className="w-6 h-6" />}
             onClick={() => folderInputRef.current?.click()}
             delay={0.4}
@@ -129,7 +139,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
               onClick={onShowDocs}
               className="hover:text-zinc-300 transition-colors flex items-center gap-2 text-sm font-medium pointer-events-auto"
             >
-              <HelpCircle className="w-4 h-4" /> Documentation
+              <HelpCircle className="w-4 h-4" /> {t('home.documentation')}
             </button>
             <div className="flex items-center gap-2 text-sm">
               <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
@@ -138,7 +148,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
           </div>
 
           <div className="flex items-center gap-4 text-zinc-600 text-sm italic">
-            Proudly optimized for M.U.G.E.N Standard
+            {t('home.credits')}
           </div>
         </footer>
       </div>

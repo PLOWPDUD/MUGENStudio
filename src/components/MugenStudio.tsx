@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { motion } from 'motion/react';
 import { 
   File as FileIcon, FolderOpen, Save, Undo, Redo, Scissors, Copy, Clipboard,
@@ -15,6 +16,7 @@ import { parseAirString, serializeAirData } from '../lib/mugen/airParser';
 import type { SffData, AirData } from '../lib/mugen/types';
 import { parseSndBinary, buildSndBinary } from '../lib/mugen/sndParser';
 import type { SndSound, SndData } from '../lib/mugen/sndParser';
+import { LanguagePicker } from './LanguagePicker';
 
 function generateBeepWav(freq: number, durationMs: number, type: 'sine' | 'square' | 'noise' = 'sine'): Uint8Array {
   const sampleRate = 11025;
@@ -88,6 +90,7 @@ export default function MugenStudio({
   onBackToHome,
   onShowDocs
 }: MugenStudioProps) {
+  const { t, i18n } = useTranslation();
   const [activeMode, setActiveMode] = useState<'Definitions' | 'Sprites' | 'Animations' | 'Commands' | 'States' | 'Sounds' | 'Backgrounds'>('Definitions');
   
   // Data State
@@ -2193,7 +2196,7 @@ export default function MugenStudio({
                       }}
                       className={`px-3 py-1 cursor-pointer transition-colors ${activeMode === item || (item === 'Project' && activeMode === 'Definitions') ? 'bg-[#333] text-blue-400' : 'text-gray-300 hover:bg-[#333]'}`}
                   >
-                      {item}
+                      {t(`studio.modes.${item.toLowerCase()}`)}
                   </div>
                   {item === 'Edit' && activeDropdown === 'Edit' && (
                     <div 
@@ -2201,17 +2204,17 @@ export default function MugenStudio({
                       onClick={(e) => e.stopPropagation()}
                     >
                       <button onClick={(e) => { e.stopPropagation(); undo(); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600 flex justify-between">
-                        <span>Undo</span><span className="text-gray-500 text-[10px]">Ctrl+Z</span>
+                        <span>{t('studio.toolbar.undo')}</span><span className="text-gray-500 text-[10px]">Ctrl+Z</span>
                       </button>
                       <button onClick={(e) => { e.stopPropagation(); redo(); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600 flex justify-between">
-                        <span>Redo</span><span className="text-gray-500 text-[10px]">Ctrl+Y</span>
+                        <span>{t('studio.toolbar.redo')}</span><span className="text-gray-500 text-[10px]">Ctrl+Y</span>
                       </button>
                       <div className="h-px bg-[#444] my-1" />
                       <button onClick={(e) => { e.stopPropagation(); if (activeMode === 'Sprites') handleCopySprite(); if (activeMode === 'Animations') handleCopyCLSN(); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600 flex justify-between">
-                        <span>Copy</span><span className="text-gray-500 text-[10px]">Ctrl+C</span>
+                        <span>{t('studio.toolbar.copy')}</span><span className="text-gray-500 text-[10px]">Ctrl+C</span>
                       </button>
                       <button onClick={(e) => { e.stopPropagation(); if (activeMode === 'Sprites') handlePasteSprite(); if (activeMode === 'Animations') handlePasteCLSN(); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600 flex justify-between">
-                        <span>Paste</span><span className="text-gray-500 text-[10px]">Ctrl+V</span>
+                        <span>{t('studio.toolbar.paste')}</span><span className="text-gray-500 text-[10px]">Ctrl+V</span>
                       </button>
                       <div className="h-px bg-[#444] my-1" />
                       <button onClick={(e) => { e.stopPropagation(); if (activeMode==='Sprites') handleDuplicateSprite(); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600">Duplicate</button>
@@ -2223,18 +2226,18 @@ export default function MugenStudio({
                       onClick={(e) => e.stopPropagation()}
                     >
                       <button onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(10, z + 0.5)); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600 flex justify-between">
-                        <span>Zoom In</span><span className="text-gray-500 text-[10px]">Ctrl++</span>
+                        <span>{t('studio.modes.zoomIn')}</span><span className="text-gray-500 text-[10px]">Ctrl++</span>
                       </button>
                       <button onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(0.25, z - 0.5)); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600 flex justify-between">
-                        <span>Zoom Out</span><span className="text-gray-500 text-[10px]">Ctrl+-</span>
+                        <span>{t('studio.modes.zoomOut')}</span><span className="text-gray-500 text-[10px]">Ctrl+-</span>
                       </button>
-                      <button onClick={(e) => { e.stopPropagation(); setZoom(2); setPan({x:0, y:0}); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600">Reset View</button>
+                      <button onClick={(e) => { e.stopPropagation(); setZoom(2); setPan({x:0, y:0}); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600">{t('studio.modes.resetView')}</button>
                       <div className="h-px bg-[#444] my-1" />
                       <button onClick={(e) => { e.stopPropagation(); setShowAxis(prev => !prev); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600 flex justify-between">
-                        <span>{showAxis ? 'Hide' : 'Show'} Axis</span><span className="text-gray-500 text-[10px]">A</span>
+                        <span>{showAxis ? t('studio.modes.hideAxis') : t('studio.modes.showAxis')}</span><span className="text-gray-500 text-[10px]">A</span>
                       </button>
                       <button onClick={(e) => { e.stopPropagation(); setShowClsn(prev => !prev); setActiveDropdown(null); }} className="w-full text-left px-4 py-1.5 hover:bg-blue-600 flex justify-between">
-                        <span>{showClsn ? 'Hide' : 'Show'} Hitboxes</span><span className="text-gray-500 text-[10px]">C</span>
+                        <span>{showClsn ? t('studio.modes.hideHitboxes') : t('studio.modes.showHitboxes')}</span><span className="text-gray-500 text-[10px]">C</span>
                       </button>
                     </div>
                   )}
@@ -2249,23 +2252,24 @@ export default function MugenStudio({
          >
            <HelpCircle size={14} />
          </button>
+         <LanguagePicker />
       </div>
 
       {/* Main Toolbar */}
       <div className="flex items-center gap-1 px-2 py-1 border-b border-[#111111] overflow-x-auto whitespace-nowrap shrink-0 max-w-[100vw]" style={{ background: 'linear-gradient(to bottom, #4a4a4a, #2f2f2f)' }}>
-        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="New" onClick={handleCreateNew}><FileIcon size={16} color="#4ade80" /></button>
-        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="Open" onClick={() => fileInputRef.current?.click()}><FolderOpen size={16} color="#60a5fa" /></button>
-        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="Save" onClick={handleSave}><Save size={16} color="#60a5fa" /></button>
-        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="Export Character to ZIP" onClick={() => setShowExportZipModal(true)}><Download size={16} color="#4ade80" /></button>
+        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.new') || 'New'} onClick={handleCreateNew}><FileIcon size={16} color="#4ade80" /></button>
+        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.open') || 'Open'} onClick={() => fileInputRef.current?.click()}><FolderOpen size={16} color="#60a5fa" /></button>
+        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.save') || 'Save'} onClick={handleSave}><Save size={16} color="#60a5fa" /></button>
+        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('common.export') || 'Export Character to ZIP'} onClick={() => setShowExportZipModal(true)}><Download size={16} color="#4ade80" /></button>
         <div className="w-px h-6 bg-[#1a1a1a] mx-1 shrink-0" />
-        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="Undo" onClick={undo}><Undo size={16} color="#f87171" /></button>
-        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="Redo" onClick={redo}><Redo size={16} color="#f87171" /></button>
+        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.undo') || 'Undo'} onClick={undo}><Undo size={16} color="#f87171" /></button>
+        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.redo') || 'Redo'} onClick={redo}><Redo size={16} color="#f87171" /></button>
         <div className="w-px h-6 bg-[#1a1a1a] mx-1 shrink-0" />
-        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="Cut"><Scissors size={16} color="#9ca3af" /></button>
-        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="Copy" onClick={() => { if(activeMode==='Sprites') handleCopySprite(); else if(activeMode==='Animations') handleCopyCLSN(); }}><Copy size={16} color="#9ca3af" /></button>
-        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="Paste" onClick={() => { if(activeMode==='Sprites') handlePasteSprite(); else if(activeMode==='Animations') handlePasteCLSN(); }}><Clipboard size={16} color="#9ca3af" /></button>
+        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.cut') || 'Cut'}><Scissors size={16} color="#9ca3af" /></button>
+        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.copy') || 'Copy'} onClick={() => { if(activeMode==='Sprites') handleCopySprite(); else if(activeMode==='Animations') handleCopyCLSN(); }}><Copy size={16} color="#9ca3af" /></button>
+        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.paste') || 'Paste'} onClick={() => { if(activeMode==='Sprites') handlePasteSprite(); else if(activeMode==='Animations') handlePasteCLSN(); }}><Clipboard size={16} color="#9ca3af" /></button>
         <div className="w-px h-6 bg-[#1a1a1a] mx-1 shrink-0" />
-        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title="Search"><Search size={16} color="#9ca3af" /></button>
+        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.search') || 'Search'}><Search size={16} color="#9ca3af" /></button>
       </div>
 
       {/* Mobile Tabs */}
@@ -2274,13 +2278,13 @@ export default function MugenStudio({
              className={`flex-1 text-center py-2 border-r border-[#333] cursor-pointer ${mobileTab === 'left' ? 'text-blue-400 border-b-2 border-blue-400 bg-blue-900/20' : 'text-gray-400'}`}
              onClick={() => setMobileTab('left')}
          >
-             Properties
+             {t('studio.properties')}
          </div>
          <div 
              className={`flex-1 text-center py-2 border-r border-[#333] cursor-pointer ${mobileTab === 'center' ? 'text-blue-400 border-b-2 border-blue-400 bg-blue-900/20' : 'text-gray-400'}`}
              onClick={() => setMobileTab('center')}
          >
-             Canvas
+             {t('studio.canvas')}
          </div>
          {(activeMode === 'Sprites' || activeMode === 'Animations') && (
              <div 
@@ -2306,7 +2310,7 @@ export default function MugenStudio({
              className={`md:w-72 w-full border-r border-[#111111] bg-[#1e1e1e] flex-col select-none ${mobileTab === 'left' ? 'flex absolute inset-0 z-30 md:relative' : 'hidden md:flex'}`}
          >
             <div className="bg-[#111111] text-gray-300 font-bold py-2 px-3 flex justify-between items-center border-b border-[#333333]">
-                <span className="uppercase text-[10px] tracking-wider">{activeMode} properties</span>
+                <span className="uppercase text-[10px] tracking-wider">{t(`studio.modes.${activeMode.toLowerCase()}`)} {t('studio.properties')}</span>
                 <span className="text-[9px] bg-blue-900/50 text-blue-400 px-1.5 py-0.5 rounded font-mono">
                     ID: {activeMode === 'Sprites' ? (selectedSpriteIdx !== null ? selectedSpriteIdx : '0') : (selectedActionId !== null ? selectedActionId : '0')}
                 </span>
@@ -2315,10 +2319,10 @@ export default function MugenStudio({
             <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-4">
                 {activeMode === 'Definitions' && (
                     <div className="flex flex-col gap-3">
-                        <div className="text-xs font-semibold text-gray-400 border-b border-[#333333] pb-1">Visual Metadata Form</div>
+                        <div className="text-xs font-semibold text-gray-400 border-b border-[#333333] pb-1">{t('studio.visualMetadata')}</div>
                         
                         <div className="flex flex-col gap-1">
-                            <label className="text-[10px] text-gray-400">Character Name</label>
+                            <label className="text-[10px] text-gray-400">{t('studio.charName')}</label>
                             <input 
                                 type="text"
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded"
@@ -2328,7 +2332,7 @@ export default function MugenStudio({
                         </div>
 
                         <div className="flex flex-col gap-1">
-                            <label className="text-[10px] text-gray-400">Display Name</label>
+                            <label className="text-[10px] text-gray-400">{t('studio.displayName')}</label>
                             <input 
                                 type="text" 
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded"
@@ -2338,7 +2342,7 @@ export default function MugenStudio({
                         </div>
 
                         <div className="flex flex-col gap-1">
-                            <label className="text-[10px] text-gray-400">Author</label>
+                            <label className="text-[10px] text-gray-400">{t('studio.author')}</label>
                             <input 
                                 type="text" 
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded"
@@ -2348,7 +2352,7 @@ export default function MugenStudio({
                         </div>
 
                         <div className="flex flex-col gap-1">
-                            <label className="text-[10px] text-gray-400">M.U.G.E.N Version</label>
+                            <label className="text-[10px] text-gray-400">{t('studio.mugenVersion')}</label>
                             <input 
                                 type="text" 
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded"
@@ -2357,10 +2361,10 @@ export default function MugenStudio({
                             />
                         </div>
 
-                        <div className="text-xs font-semibold text-gray-400 border-b border-[#333333] pt-2 pb-1">Asset References</div>
+                        <div className="text-xs font-semibold text-gray-400 border-b border-[#333333] pt-2 pb-1">{t('studio.assetReferences')}</div>
 
                         <div className="flex flex-col gap-1">
-                            <label className="text-[10px] text-gray-400">States File (CNS)</label>
+                            <label className="text-[10px] text-gray-400">{t('studio.statesFile')}</label>
                             <input 
                                 type="text" 
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded font-mono"
@@ -2370,7 +2374,7 @@ export default function MugenStudio({
                         </div>
 
                         <div className="flex flex-col gap-1">
-                            <label className="text-[10px] text-gray-400">Sprites (SFF)</label>
+                            <label className="text-[10px] text-gray-400">{t('studio.spritesFile')}</label>
                             <input 
                                 type="text" 
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded font-mono"
@@ -2380,7 +2384,7 @@ export default function MugenStudio({
                         </div>
 
                         <div className="flex flex-col gap-1">
-                            <label className="text-[10px] text-gray-400">Animations (AIR)</label>
+                            <label className="text-[10px] text-gray-400">{t('studio.animationsFile')}</label>
                             <input 
                                 type="text" 
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded font-mono"
@@ -2390,7 +2394,7 @@ export default function MugenStudio({
                         </div>
 
                         <div className="text-[10px] text-gray-500 italic mt-2 text-center">
-                            Changes visually synced back to DEF editor panel instantly.
+                            {t('studio.syncedBack')}
                         </div>
                     </div>
                 )}
@@ -2404,21 +2408,21 @@ export default function MugenStudio({
                                 className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all ${spriteSidebarTab === 'gallery' ? 'bg-[#333] text-blue-400 shadow-sm' : 'text-gray-500 hover:text-gray-300'}`}
                             >
                                 <ImageIcon size={12} />
-                                Gallery
+                                {t('studio.gallery')}
                             </button>
                             <button 
                                 onClick={() => setSpriteSidebarTab('palettes')}
                                 className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all ${spriteSidebarTab === 'palettes' ? 'bg-[#333] text-purple-400 shadow-sm' : 'text-gray-500 hover:text-gray-300'}`}
                             >
                                 <Palette size={12} />
-                                Palettes
+                                {t('studio.palettes')}
                             </button>
                             <button 
                                 onClick={() => setSpriteSidebarTab('layers')}
                                 className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all ${spriteSidebarTab === 'layers' ? 'bg-[#333] text-green-400 shadow-sm' : 'text-gray-500 hover:text-gray-300'}`}
                             >
                                 <Box size={12} />
-                                Layers
+                                {t('studio.layers')}
                             </button>
                         </div>
 
@@ -2449,7 +2453,7 @@ export default function MugenStudio({
                                             title="Import custom PNG/JPG file"
                                         >
                                             <Plus size={12} />
-                                            Import
+                                            {t('common.import')}
                                         </button>
                                         <button 
                                             onClick={() => replaceSpriteInputRef.current?.click()}
@@ -2462,7 +2466,7 @@ export default function MugenStudio({
                                             title="Replace selected sprites with new images (keeps group/index)"
                                         >
                                             <Upload size={12} />
-                                            Replace
+                                            {t('common.replace')}
                                         </button>
                                         <button 
                                             onClick={handleDeleteSprite}
@@ -2470,7 +2474,7 @@ export default function MugenStudio({
                                             title="Delete active sprite from sheet"
                                         >
                                             <Minus size={12} />
-                                            Delete
+                                            {t('common.delete')}
                                         </button>
                                         <button 
                                             onClick={handleDuplicateSprite}
@@ -2478,7 +2482,7 @@ export default function MugenStudio({
                                             title="Duplicate active sprite (Index + 1)"
                                         >
                                             <Copy size={12} />
-                                            Clone
+                                            {t('common.clone')}
                                         </button>
                                     </div>
                                     <button 
@@ -2487,7 +2491,7 @@ export default function MugenStudio({
                                         title="Export all sprites as a ZIP package of PNGs"
                                     >
                                         <Download size={12} />
-                                        Export All (.ZIP)
+                                        {t('common.exportAll')}
                                     </button>
                                     <button 
                                         onClick={handleExportSelectedSpritesZip}
@@ -2500,7 +2504,7 @@ export default function MugenStudio({
                                         title="Export only selected sprites as a ZIP package of PNGs"
                                     >
                                         <Download size={12} />
-                                        Export Selected ({selectedSpriteIndices.size})
+                                        {t('common.exportSelected', { count: selectedSpriteIndices.size })}
                                     </button>
                                     <input 
                                         type="file" 
@@ -2523,7 +2527,7 @@ export default function MugenStudio({
                                 <div className="bg-[#242424] p-3 border border-[#333] rounded flex flex-col gap-3 shrink-0">
                                     <div className="grid grid-cols-2 gap-2">
                                         <div className="flex flex-col gap-1">
-                                            <span className="text-[10px] text-gray-400">Group No.</span>
+                                            <span className="text-[10px] text-gray-400">{t('studio.groupNo')}</span>
                                             <div className="flex bg-[#1e1e1e] border border-[#3a3a3a] items-center rounded overflow-hidden">
                                                 <button className="text-blue-500 hover:bg-[#333] px-2 py-0.5" onClick={() => handleUpdateSprite('group', (sffData.images[selectedSpriteIdx]?.group ?? 0) - 1)}>-</button>
                                                 <input type="number" className="bg-transparent w-full text-center outline-none text-xs" value={sffData.images[selectedSpriteIdx]?.group ?? 0} onChange={e => handleUpdateSprite('group', parseInt(e.target.value) || 0)} />
@@ -2531,7 +2535,7 @@ export default function MugenStudio({
                                             </div>
                                         </div>
                                         <div className="flex flex-col gap-1">
-                                            <span className="text-[10px] text-gray-400">Image No.</span>
+                                            <span className="text-[10px] text-gray-400">{t('studio.imageNo')}</span>
                                             <div className="flex bg-[#1e1e1e] border border-[#3a3a3a] items-center rounded overflow-hidden">
                                                 <button className="text-blue-500 hover:bg-[#333] px-2 py-0.5" onClick={() => handleUpdateSprite('image', (sffData.images[selectedSpriteIdx]?.image ?? 0) - 1)}>-</button>
                                                 <input type="number" className="bg-transparent w-full text-center outline-none text-xs" value={sffData.images[selectedSpriteIdx]?.image ?? 0} onChange={e => handleUpdateSprite('image', parseInt(e.target.value) || 0)} />
@@ -2541,7 +2545,7 @@ export default function MugenStudio({
                                     </div>
 
                                     {/* Pivot axis settings */}
-                                    <div className="text-[10px] font-semibold text-gray-400 border-b border-[#333] pb-1 mt-1">Pivot Offset (Coordinates)</div>
+                                    <div className="text-[10px] font-semibold text-gray-400 border-b border-[#333] pb-1 mt-1">{t('studio.pivotOffset')}</div>
                                     <div className="grid grid-cols-2 gap-2">
                                         <div className="flex flex-col gap-1">
                                             <span className="text-[10px] text-gray-400">X Offset:</span>

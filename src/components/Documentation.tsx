@@ -31,14 +31,14 @@ const Documentation: React.FC<DocumentationProps> = ({ onClose }) => {
           </div>
           <button 
             onClick={onClose}
-            className="p-2 hover:bg-zinc-800 rounded-lg transition-colors text-zinc-400 hover:text-white"
+            className="p-2 hover:bg-zinc-800 rounded-lg transition-colors text-zinc-100 hover:text-white"
           >
             <X className="w-6 h-6" />
           </button>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
-          <div className="prose prose-invert max-w-none">
+        <div className="flex-1 overflow-y-auto p-8 custom-scrollbar text-white">
+          <div className="prose prose-invert max-w-none text-white">
             <section className="mb-12">
               <h3 className="text-2xl font-bold mb-4 flex items-center gap-2 text-white">
                 <Zap className="w-5 h-5 text-yellow-500" /> {t('docs.gettingStarted')}
@@ -49,11 +49,11 @@ const Documentation: React.FC<DocumentationProps> = ({ onClose }) => {
               <div className="bg-zinc-900/50 rounded-xl p-4 border border-zinc-800">
                 <ul className="space-y-2 text-sm text-zinc-100">
                   <li className="flex items-start gap-2">
-                    <ChevronRight className="w-4 h-4 mt-1 text-zinc-500" />
+                    <ChevronRight className="w-4 h-4 mt-1 text-zinc-100" />
                     <span><strong>{t('docs.qa1_title')}:</strong> {t('docs.qa1_desc')}</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <ChevronRight className="w-4 h-4 mt-1 text-zinc-500" />
+                    <ChevronRight className="w-4 h-4 mt-1 text-zinc-100" />
                     <span><strong>{t('docs.qa2_title')}:</strong> {t('docs.qa2_desc')}</span>
                   </li>
                 </ul>
@@ -70,11 +70,11 @@ const Documentation: React.FC<DocumentationProps> = ({ onClose }) => {
               <div className="space-y-4 text-zinc-100 border-l-2 border-zinc-800 pl-4 py-1">
                 <div>
                   <h4 className="font-bold text-white">{t('docs.spriteTitle1')}</h4>
-                  <p className="text-sm">{t('docs.spriteNote1')}</p>
+                  <p className="text-zinc-100 text-sm">{t('docs.spriteNote1')}</p>
                 </div>
                 <div>
                   <h4 className="font-bold text-white">{t('docs.spriteTitle2')}</h4>
-                  <p className="text-sm text-zinc-300 italic">{t('docs.spriteNote2')}</p>
+                  <p className="text-sm text-zinc-100 italic">{t('docs.spriteNote2')}</p>
                 </div>
               </div>
             </section>
@@ -111,7 +111,7 @@ const Documentation: React.FC<DocumentationProps> = ({ onClose }) => {
             </section>
 
             <div className="pt-8 border-t border-zinc-800 text-center">
-              <p className="text-zinc-400 text-sm italic">
+              <p className="text-zinc-100 text-sm italic">
                 {t('docs.footer')}
               </p>
             </div>

@@ -123,6 +123,7 @@ export default function MugenStudio({
   const [historyIndex, setHistoryIndex] = useState(-1);
   const sffDataRef = useRef<SffData | null>(null);
   const airDataRef = useRef<AirData | null>(null);
+  const spriteLayersMapRef = useRef<Record<number, DrawingLayer[]>>({});
   const hasChangedThisStroke = useRef(false);
 
   interface DrawingLayer {
@@ -156,12 +157,17 @@ export default function MugenStudio({
 
   useEffect(() => { sffDataRef.current = sffData; }, [sffData]);
   useEffect(() => { airDataRef.current = airData; }, [airData]);
+  useEffect(() => { spriteLayersMapRef.current = spriteLayersMap; }, [spriteLayersMap]);
 
   const updateLayersForSprite = (spriteIdx: number, newLayers: DrawingLayer[], currentSff?: SffData | null) => {
-    setSpriteLayersMap(prev => ({
-      ...prev,
-      [spriteIdx]: newLayers
-    }));
+    setSpriteLayersMap(prev => {
+      const next = {
+        ...prev,
+        [spriteIdx]: newLayers
+      };
+      spriteLayersMapRef.current = next;
+      return next;
+    });
     
     const activeSff = currentSff !== undefined ? currentSff : sffDataRef.current;
     if (!activeSff) return;
@@ -197,8 +203,8 @@ export default function MugenStudio({
 
   const getSpriteLayers = (spriteIdx: number, sprite: any): DrawingLayer[] => {
     if (!sprite) return [];
-    if (spriteLayersMap[spriteIdx]) {
-      const layers = spriteLayersMap[spriteIdx];
+    if (spriteLayersMapRef.current[spriteIdx]) {
+      const layers = spriteLayersMapRef.current[spriteIdx];
       const expectedSize = sprite.width * sprite.height;
       return layers.map(layer => {
         if (layer.pixelIndices.length !== expectedSize) {
@@ -316,7 +322,7 @@ export default function MugenStudio({
     const newState = {
       sff: sff !== undefined ? sff : sffDataRef.current,
       air: air !== undefined ? air : airDataRef.current,
-      layersMap: layersMap !== undefined ? layersMap : spriteLayersMap,
+      layersMap: layersMap !== undefined ? layersMap : spriteLayersMapRef.current,
     };
     
     setHistory(prev => {
@@ -406,9 +412,12 @@ export default function MugenStudio({
     if (historyIndex > 0) {
       const prev = history[historyIndex - 1];
       setSffData(prev.sff);
+      sffDataRef.current = prev.sff;
       setAirData(prev.air);
+      airDataRef.current = prev.air;
       if (prev.layersMap) {
         setSpriteLayersMap(prev.layersMap);
+        spriteLayersMapRef.current = prev.layersMap;
       }
       setHistoryIndex(historyIndex - 1);
     }
@@ -418,9 +427,12 @@ export default function MugenStudio({
     if (historyIndex < history.length - 1) {
       const next = history[historyIndex + 1];
       setSffData(next.sff);
+      sffDataRef.current = next.sff;
       setAirData(next.air);
+      airDataRef.current = next.air;
       if (next.layersMap) {
         setSpriteLayersMap(next.layersMap);
+        spriteLayersMapRef.current = next.layersMap;
       }
       setHistoryIndex(historyIndex + 1);
     }
@@ -819,6 +831,15 @@ export default function MugenStudio({
 
     let currentSff = sffData;
     let currentGlobalPal = actPalette;
+
+    // Better detection of active palette for 'adapt'
+    if (!currentGlobalPal && currentSff) {
+        if (currentSff.palettes.length > 0) {
+            currentGlobalPal = currentSff.palettes[selectedPaletteIdx]?.data || currentSff.palettes[0].data;
+        } else if (currentSff.images.length > 0) {
+            currentGlobalPal = currentSff.images[0].palette || null;
+        }
+    }
     
     const replacementIndices: number[] = isReplacing ? Array.from(selectedSpriteIndices).map(Number).sort((a, b) => a - b) : [];
     let replacementHead = 0;
@@ -827,6 +848,7 @@ export default function MugenStudio({
     let currentI = importIndex;
 
     const newImages = currentSff ? [...currentSff.images] : [];
+    const newPalettes = currentSff ? [...currentSff.palettes] : [];
 
     for (const item of pendingImportFiles) {
       if (isReplacing && replacementHead >= replacementIndices.length) break;
@@ -846,7 +868,7 @@ export default function MugenStudio({
           const imgData = ctx.getImageData(0, 0, img.width, img.height);
           
           // Active palette
-          const activePal = currentGlobalPal || (newImages.length > 0 ? newImages[0].palette : null);
+          const activePal = currentGlobalPal;
           
           let targetPaletteForProcessing = activePal;
           if (mode === 'image_palette' || mode === 'exchange') {
@@ -858,6 +880,13 @@ export default function MugenStudio({
           if (mode === 'exchange' && palette) {
              currentGlobalPal = palette;
              setActPalette(palette);
+             
+             // Also update the primary SFF palette if it exists
+             if (newPalettes.length > 0) {
+                 newPalettes[selectedPaletteIdx] = { ...newPalettes[selectedPaletteIdx], data: palette };
+             } else {
+                 newPalettes.push({ group: 1, item: 1, data: palette });
+             }
           }
 
           if (isReplacing) {
@@ -871,7 +900,7 @@ export default function MugenStudio({
               pixelIndices: indices,
               isSharedPalette: mode !== 'image_palette',
               comment: item.file.name,
-              palette: mode === 'image_palette' ? palette : (mode === 'exchange' ? palette : null)
+              palette: (mode === 'image_palette' || mode === 'exchange') ? palette : null
             };
             newImages[idxToReplace] = newSprite;
             replacementHead++;
@@ -886,7 +915,7 @@ export default function MugenStudio({
               pixelIndices: indices,
               isSharedPalette: mode !== 'image_palette',
               comment: item.file.name,
-              palette: mode === 'image_palette' ? palette : (mode === 'exchange' ? palette : null)
+              palette: (mode === 'image_palette' || mode === 'exchange') ? palette : null
             };
             newImages.push(newSprite);
             currentI++;
@@ -906,7 +935,8 @@ export default function MugenStudio({
       const nextSff = {
         ...currentSff,
         numImages: newImages.length,
-        images: newImages
+        images: newImages,
+        palettes: newPalettes
       };
       setSffData(nextSff);
       if (isReplacing) {
@@ -920,7 +950,8 @@ export default function MugenStudio({
         version: 'ElecbyteSpr\x00',
         numGroups: 1, 
         numImages: newImages.length,
-        images: newImages
+        images: newImages,
+        palettes: newPalettes
       } as SffData;
       setSffData(nextSff);
       setSelectedSpriteIdx(0);
@@ -4042,11 +4073,19 @@ export default function MugenStudio({
                         activeMode === 'Sprites' ? (() => {
                             const sprite = sffData.images[selectedSpriteIdx];
                             
-                            // Hierarchy: Selection > First > External > Internal
+                            // Hierarchy: 
+                            // 1. If sprite has its own private palette, use it.
+                            // 2. Otherwise: Selection > First > External
                             const selectionPal = sffData.palettes[selectedPaletteIdx];
                             const firstSffPal = sffData.palettes.length > 0 ? sffData.palettes[0] : null;
                             
-                            const effectivePalette = selectionPal?.data || firstSffPal?.data || actPalette || sprite?.palette;
+                            let effectivePalette = actPalette || sprite?.palette || firstSffPal?.data;
+
+                            if (sprite && sprite.isSharedPalette === false && sprite.palette) {
+                                effectivePalette = sprite.palette;
+                            } else {
+                                effectivePalette = selectionPal?.data || firstSffPal?.data || actPalette || sprite?.palette;
+                            }
                             
                             return (
                                 <FF3SpriteRenderer 

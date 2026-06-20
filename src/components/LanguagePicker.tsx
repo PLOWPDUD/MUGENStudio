@@ -15,6 +15,7 @@ const languages = [
   { code: 'tr', name: 'Türkçe' },
   { code: 'el', name: 'Ελληνικά' },
   { code: 'ar', name: 'العربية' },
+  { code: 'nl', name: 'Nederlands' },
 ];
 
 export const LanguagePicker: React.FC = () => {

@@ -711,18 +711,28 @@ export default function MugenStudio({
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
 
-    if (!sffData) {
-        alert("Load an SFF first or create a new project.");
-        return;
+    let baseSff = sffData;
+    if (!baseSff) {
+        // Create a shell SFF if none exists so we can store palettes
+        baseSff = {
+            version: '1.1',
+            numGroups: 0,
+            numImages: 0,
+            images: [],
+            palettes: []
+        };
     }
 
-    const nextPalettes = [...(sffData.palettes || [])];
+    const nextPalettes = [...(baseSff.palettes || [])];
     
     for (const file of files) {
         try {
             const buffer = await (file as any).arrayBuffer();
             const paletteData = parseActBinary(buffer);
             
+            // Also set as the immediate active palette for rendering
+            setActPalette(paletteData);
+
             let nextGroup = 1;
             let nextItem = 1;
             if (nextPalettes.length > 0) {
@@ -741,11 +751,13 @@ export default function MugenStudio({
         }
     }
 
-    setSffData({
-        ...sffData,
+    const nextSff = {
+        ...baseSff,
         palettes: nextPalettes
-    });
+    };
+    setSffData(nextSff);
     setSelectedPaletteIdx(nextPalettes.length - 1);
+    pushToHistory(nextSff);
     if (paletteActInputRef.current) paletteActInputRef.current.value = '';
   };
 
@@ -831,10 +843,11 @@ export default function MugenStudio({
 
     let currentSff = sffData;
     let currentGlobalPal = actPalette;
+    let batchPalette: Uint8Array | null = null; // Palette shared across this import batch
 
     // Better detection of active palette for 'adapt'
     if (!currentGlobalPal && currentSff) {
-        if (currentSff.palettes.length > 0) {
+        if (currentSff.palettes && currentSff.palettes.length > 0) {
             currentGlobalPal = currentSff.palettes[selectedPaletteIdx]?.data || currentSff.palettes[0].data;
         } else if (currentSff.images.length > 0) {
             currentGlobalPal = currentSff.images[0].palette || null;
@@ -848,7 +861,7 @@ export default function MugenStudio({
     let currentI = importIndex;
 
     const newImages = currentSff ? [...currentSff.images] : [];
-    const newPalettes = currentSff ? [...currentSff.palettes] : [];
+    const newPalettes = currentSff ? [...(currentSff.palettes || [])] : [];
 
     for (const item of pendingImportFiles) {
       if (isReplacing && replacementHead >= replacementIndices.length) break;
@@ -868,24 +881,43 @@ export default function MugenStudio({
           const imgData = ctx.getImageData(0, 0, img.width, img.height);
           
           // Active palette
-          const activePal = currentGlobalPal;
+          const activePal = batchPalette || currentGlobalPal;
           
           let targetPaletteForProcessing = activePal;
-          if (mode === 'image_palette' || mode === 'exchange') {
-             targetPaletteForProcessing = null; // Forces extraction of new palette
+          if (mode === 'exchange' || mode === 'image_palette') {
+             // If we already have a palette for this batch in exchange mode, use it.
+             // For image_palette (Palette from Sprite), we might want each unique, but usually shared is better for batch.
+             if (mode === 'exchange' && batchPalette) {
+                targetPaletteForProcessing = batchPalette;
+             } else {
+                targetPaletteForProcessing = null; // Forces extraction of new palette
+             }
           }
           
           const { indices, palette } = imageToSpriteIndices(imgData.data, img.width, img.height, targetPaletteForProcessing);
 
-          if (mode === 'exchange' && palette) {
+          if (!batchPalette && (mode === 'exchange' || mode === 'image_palette') && palette) {
+             batchPalette = palette;
              currentGlobalPal = palette;
              setActPalette(palette);
              
-             // Also update the primary SFF palette if it exists
-             if (newPalettes.length > 0) {
+             // Also add/update the SFF palette collection
+             if (mode === 'exchange' && newPalettes.length > 0) {
                  newPalettes[selectedPaletteIdx] = { ...newPalettes[selectedPaletteIdx], data: palette };
              } else {
-                 newPalettes.push({ group: 1, item: 1, data: palette });
+                 // For exchange or image_palette, if it's the first time or we're adding new, push it
+                 let nextGroup = 1;
+                 let nextItem = 1;
+                 if (newPalettes.length > 0) {
+                    const last = newPalettes[newPalettes.length - 1];
+                    nextGroup = last.group;
+                    nextItem = last.item + 1;
+                 }
+                 newPalettes.push({ group: nextGroup, item: nextItem, data: palette });
+                 // Update selection to the newly added palette if in exchange mode
+                 if (mode === 'exchange') {
+                    setSelectedPaletteIdx(newPalettes.length - 1);
+                 }
              }
           }
 
@@ -1414,7 +1446,21 @@ export default function MugenStudio({
                 }
             } else if (ext === 'act') {
                 const buffer = await file.arrayBuffer();
-                setActPalette(parseActBinary(buffer));
+                const paletteData = parseActBinary(buffer);
+                setActPalette(paletteData);
+                
+                // Also add to SFF palettes if possible
+                setSffData(prev => {
+                    if (!prev) return prev;
+                    const nextPalettes = [...(prev.palettes || [])];
+                    const existingIdx = nextPalettes.findIndex(p => p.group === 1 && p.item === 1);
+                    if (existingIdx >= 0) {
+                        nextPalettes[existingIdx] = { ...nextPalettes[existingIdx], data: paletteData };
+                    } else {
+                        nextPalettes.push({ group: 1, item: 1, data: paletteData });
+                    }
+                    return { ...prev, palettes: nextPalettes };
+                });
             } else if (ext === 'air') {
                 const text = await file.text();
                 setAirData(parseAirString(text));
@@ -2672,7 +2718,7 @@ export default function MugenStudio({
                                          </button>
                                      </div>
                                      <div className="h-48 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 flex flex-col gap-1 text-[11px]">
-                                         {sffData.palettes.map((pal, i) => (
+                                         {(sffData.palettes || []).map((pal, i) => (
                                              <div 
                                                  key={i}
                                                  onClick={() => setSelectedPaletteIdx(i)}
@@ -2685,7 +2731,7 @@ export default function MugenStudio({
                                                  {selectedPaletteIdx === i && <span className="text-[8px] bg-purple-500 text-white px-1 rounded">ACTIVE</span>}
                                              </div>
                                          ))}
-                                         {sffData.palettes.length === 0 && (
+                                         {(!sffData.palettes || sffData.palettes.length === 0) && (
                                              <div className="p-4 text-center text-gray-500 italic text-[10px]">
                                                  No palettes detected in SFF. Import an .act file to begin.
                                              </div>
@@ -2693,7 +2739,7 @@ export default function MugenStudio({
                                      </div>
 
                                      {/* Export current */}
-                                     {(sffData.palettes[selectedPaletteIdx] || actPalette) && (
+                                     {((sffData.palettes && sffData.palettes[selectedPaletteIdx]) || actPalette) && (
                                          <button 
                                             onClick={() => {
                                                 const pal = sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette;
@@ -4076,8 +4122,8 @@ export default function MugenStudio({
                             // Hierarchy: 
                             // 1. If sprite has its own private palette, use it.
                             // 2. Otherwise: Selection > First > External
-                            const selectionPal = sffData.palettes[selectedPaletteIdx];
-                            const firstSffPal = sffData.palettes.length > 0 ? sffData.palettes[0] : null;
+                            const selectionPal = sffData.palettes ? sffData.palettes[selectedPaletteIdx] : null;
+                            const firstSffPal = (sffData.palettes && sffData.palettes.length > 0) ? sffData.palettes[0] : null;
                             
                             let effectivePalette = actPalette || sprite?.palette || firstSffPal?.data;
 
@@ -4102,7 +4148,7 @@ export default function MugenStudio({
                         })() : (
                             <AnimationStage 
                                 sff={sffData} 
-                                act={sffData.palettes[selectedPaletteIdx]?.data || sffData.palettes[0]?.data || actPalette} 
+                                act={(sffData.palettes && sffData.palettes[selectedPaletteIdx]) ? sffData.palettes[selectedPaletteIdx].data : (sffData.palettes && sffData.palettes[0]) ? sffData.palettes[0].data : actPalette} 
                                 action={selectedActionId !== null ? airData?.actions[selectedActionId] : null}
                                 frameIndex={currentFrame}
                                 zoom={zoom}
@@ -4331,7 +4377,7 @@ export default function MugenStudio({
                                     Download ACT
                                 </button>
                                 <button 
-                                    onClick={() => fileInputRef.current?.click()}
+                                    onClick={() => paletteActInputRef.current?.click()}
                                     className="p-1 px-2.5 bg-[#2a2a2a] border border-[#3a3a3a] hover:bg-[#333] rounded text-[10px] text-gray-300 font-bold flex items-center justify-center gap-1.5"
                                     title="Load .ACT binary file from disk"
                                 >
@@ -4593,7 +4639,20 @@ function FF3SpriteRenderer({ sprite, act, zoom, showAxis, pan, previewOffset, se
                     ctx.imageSmoothingEnabled = false;
                     const xOff = previewOffset ? previewOffset.x : sprite.xOffset;
                     const yOff = previewOffset ? previewOffset.y : sprite.yOffset;
-                    ctx.drawImage(offscreen, centerX - (xOff * zoom) + panX, centerY - (yOff * zoom) + panY, sprite.width * zoom, sprite.height * zoom);
+                    const drawX = centerX - (xOff * zoom) + panX;
+                    const drawY = centerY - (yOff * zoom) + panY;
+                    const drawW = sprite.width * zoom;
+                    const drawH = sprite.height * zoom;
+                    
+                    ctx.drawImage(offscreen, drawX, drawY, drawW, drawH);
+                    
+                    // Canvas Border around the sprite
+                    ctx.save();
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+                    ctx.setLineDash([2, 4]);
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(drawX, drawY, drawW, drawH);
+                    ctx.restore();
                 } catch(e) {}
             }
 
@@ -4772,9 +4831,20 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
 
                             const drawX = (elXOff - sprite.xOffset) * zoom;
                             const drawY = (elYOff - sprite.yOffset) * zoom;
+                            const drawW = sprite.width * zoom;
+                            const drawH = sprite.height * zoom;
                             
                             ctx.imageSmoothingEnabled = false;
-                            ctx.drawImage(offscreen, drawX, drawY, sprite.width * zoom, sprite.height * zoom);
+                            ctx.drawImage(offscreen, drawX, drawY, drawW, drawH);
+
+                            // Canvas Border around the sprite
+                            ctx.save();
+                            ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+                            ctx.setLineDash([2, 4]);
+                            ctx.lineWidth = 1;
+                            ctx.strokeRect(drawX, drawY, drawW, drawH);
+                            ctx.restore();
+
                             ctx.restore();
                         } catch(e) {}
                     }

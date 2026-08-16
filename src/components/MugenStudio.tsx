@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'motion/react';
 import { 
@@ -154,6 +154,172 @@ export default function MugenStudio({
     pixelIndices: Uint8Array;
     active: boolean;
   } | null>(null);
+
+  const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const searchResults = useMemo(() => {
+    if (!searchQuery.trim()) return [];
+    const q = searchQuery.toLowerCase().trim();
+    const results: Array<{ type: string; title: string; subtitle: string; action: () => void }> = [];
+
+    // 1. Sprites
+    if (sffData && sffData.images) {
+      sffData.images.forEach((img, idx) => {
+        const match = String(img.group).includes(q) || String(img.image).includes(q) || String(idx).includes(q) || `sprite ${idx}`.includes(q);
+        if (match) {
+          results.push({
+            type: 'Sprite',
+            title: `Sprite [Group ${img.group}, Image ${img.image}]`,
+            subtitle: `Index #${idx} (${img.width}x${img.height})`,
+            action: () => {
+              setActiveMode('Sprites');
+              setSelectedSpriteIdx(idx);
+              setIsSearchModalOpen(false);
+            }
+          });
+        }
+      });
+    }
+
+    // 2. Animations (AIR)
+    if (airData && airData.actions) {
+      Object.entries(airData.actions).forEach(([actionId, act]: [string, any]) => {
+        if (actionId.toLowerCase().includes(q) || `anim ${actionId}`.includes(q)) {
+          results.push({
+            type: 'Animation',
+            title: `Animation Action ${actionId}`,
+            subtitle: `${act.elements?.length || 0} frames`,
+            action: () => {
+              setActiveMode('Animations');
+              setSelectedActionId(Number(actionId));
+              setCurrentFrame(0);
+              setIsSearchModalOpen(false);
+            }
+          });
+        }
+      });
+    }
+
+    // 3. States (CNS Files)
+    stFiles.forEach(file => {
+      if (file.filename.toLowerCase().includes(q)) {
+        results.push({
+          type: 'State File',
+          title: `State File: ${file.filename}`,
+          subtitle: `CNS Document`,
+          action: () => {
+            setActiveMode('States');
+            setActiveStFileId(file.id);
+            setIsSearchModalOpen(false);
+          }
+        });
+      }
+      if (file.parsed) {
+        Object.entries(file.parsed).forEach(([sec, keys]) => {
+          if (sec.toLowerCase().includes(q)) {
+            results.push({
+              type: 'State / Section',
+              title: `[${sec}] in ${file.filename}`,
+              subtitle: `State Definition`,
+              action: () => {
+                setActiveMode('States');
+                setActiveStFileId(file.id);
+                setIsSearchModalOpen(false);
+              }
+            });
+          }
+          Object.entries(keys as Record<string, string>).forEach(([k, v]) => {
+            if (k.toLowerCase().includes(q) || String(v).toLowerCase().includes(q)) {
+              results.push({
+                type: 'CNS Key',
+                title: `${k} = ${v} ([${sec}])`,
+                subtitle: `Found in ${file.filename}`,
+                action: () => {
+                  setActiveMode('States');
+                  setActiveStFileId(file.id);
+                  setIsSearchModalOpen(false);
+                }
+              });
+            }
+          });
+        });
+      }
+    });
+
+    // 4. Commands (.cmd files)
+    cmdFiles.forEach(file => {
+      if (file.filename.toLowerCase().includes(q)) {
+        results.push({
+          type: 'Command File',
+          title: `Command File: ${file.filename}`,
+          subtitle: `CMD Document`,
+          action: () => {
+            setActiveMode('Commands');
+            setActiveCmdFileId(file.id);
+            setIsSearchModalOpen(false);
+          }
+        });
+      }
+      if (file.parsed) {
+        Object.entries(file.parsed).forEach(([sec, keys]) => {
+          Object.entries(keys as Record<string, string>).forEach(([k, v]) => {
+            if (k.toLowerCase().includes(q) || String(v).toLowerCase().includes(q) || sec.toLowerCase().includes(q)) {
+              results.push({
+                type: 'Command Item',
+                title: `${k} = ${v}`,
+                subtitle: `Section [${sec}] in ${file.filename}`,
+                action: () => {
+                  setActiveMode('Commands');
+                  setActiveCmdFileId(file.id);
+                  setIsSearchModalOpen(false);
+                }
+              });
+            }
+          });
+        });
+      }
+    });
+
+    // 5. Definitions (iniData)
+    if (iniData) {
+      Object.entries(iniData).forEach(([sec, keys]) => {
+        Object.entries(keys).forEach(([k, v]) => {
+          if (sec.toLowerCase().includes(q) || k.toLowerCase().includes(q) || String(v).toLowerCase().includes(q)) {
+            results.push({
+              type: 'Definition',
+              title: `${k} = ${v}`,
+              subtitle: `Section [${sec}] (DEF)`,
+              action: () => {
+                setActiveMode('Definitions');
+                setIsSearchModalOpen(false);
+              }
+            });
+          }
+        });
+      });
+    }
+
+    // 6. Sounds
+    if (sndData && sndData.sounds) {
+      sndData.sounds.forEach(snd => {
+        if (String(snd.group).includes(q) || String(snd.sample).includes(q) || snd.name.toLowerCase().includes(q)) {
+          results.push({
+            type: 'Sound',
+            title: `Sound [Group ${snd.group}, Sample ${snd.sample}] - ${snd.name}`,
+            subtitle: `Audio Asset`,
+            action: () => {
+              setActiveMode('Sounds');
+              setSelectedSoundId(snd.id);
+              setIsSearchModalOpen(false);
+            }
+          });
+        }
+      });
+    }
+
+    return results.slice(0, 50);
+  }, [searchQuery, sffData, airData, stFiles, cmdFiles, iniData, sndData]);
 
   useEffect(() => { sffDataRef.current = sffData; }, [sffData]);
   useEffect(() => { airDataRef.current = airData; }, [airData]);
@@ -621,12 +787,15 @@ export default function MugenStudio({
           else if (activeMode === 'Animations') {
             handlePasteCLSN();
           }
-        } else if (e.key === '+') {
+        } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === '+') {
           e.preventDefault();
           setZoom(z => Math.min(10, z + 0.5));
-        } else if (e.key === '-') {
+        } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === '-') {
           e.preventDefault();
           setZoom(z => Math.max(0.25, z - 0.5));
+        } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+          e.preventDefault();
+          setIsSearchModalOpen(prev => !prev);
         }
       } else {
         if (e.key.toLowerCase() === 'a') {
@@ -634,8 +803,12 @@ export default function MugenStudio({
         } else if (e.key.toLowerCase() === 'c') {
           setShowClsn(prev => !prev);
         } else if (e.key === 'Escape') {
-          setSelectionRect(null);
-          setPastedContent(null);
+          if (isSearchModalOpen) {
+            setIsSearchModalOpen(false);
+          } else {
+            setSelectionRect(null);
+            setPastedContent(null);
+          }
         } else if (e.key === 'Enter') {
           if (pastedContent && pastedContent.active) {
             e.preventDefault();
@@ -2346,7 +2519,7 @@ export default function MugenStudio({
         <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.copy') || 'Copy'} onClick={() => { if(activeMode==='Sprites') handleCopySprite(); else if(activeMode==='Animations') handleCopyCLSN(); }}><Copy size={16} color="#9ca3af" /></button>
         <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.paste') || 'Paste'} onClick={() => { if(activeMode==='Sprites') handlePasteSprite(); else if(activeMode==='Animations') handlePasteCLSN(); }}><Clipboard size={16} color="#9ca3af" /></button>
         <div className="w-px h-6 bg-[#1a1a1a] mx-1 shrink-0" />
-        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.search') || 'Search'}><Search size={16} color="#9ca3af" /></button>
+        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.search') || 'Search'} onClick={() => setIsSearchModalOpen(true)}><Search size={16} color="#9ca3af" /></button>
       </div>
 
       {/* Mobile Tabs */}
@@ -4447,6 +4620,61 @@ export default function MugenStudio({
               <div>Zoom: {zoom * 100}% | Hover to see coordinates</div>
           </div>
       </div>
+
+      {/* Global Search Modal */}
+      {isSearchModalOpen && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[9999] flex items-center justify-center p-4 animate-in fade-in duration-150" onClick={() => setIsSearchModalOpen(false)}>
+          <div className="bg-[#1e1e1e] border border-[#3a3a3a] rounded-xl shadow-2xl w-full max-w-2xl flex flex-col overflow-hidden max-h-[85vh]" onClick={e => e.stopPropagation()}>
+            <div className="px-4 py-3 bg-[#161616] border-b border-[#333] flex items-center gap-3">
+              <Search className="w-5 h-5 text-blue-400 shrink-0" />
+              <input
+                type="text"
+                autoFocus
+                placeholder="Search words, numbers, states (e.g. 200), sprites, sounds, commands..."
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                className="w-full bg-transparent text-white text-sm outline-none placeholder-zinc-500 font-sans"
+              />
+              <button 
+                onClick={() => setIsSearchModalOpen(false)}
+                className="text-zinc-400 hover:text-white px-2 py-1 text-xs bg-zinc-800 rounded hover:bg-zinc-700 transition-colors"
+              >
+                ESC
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-1.5 divide-y divide-[#2a2a2a]">
+              {searchResults.length === 0 ? (
+                <div className="py-12 text-center text-zinc-500 text-xs italic">
+                  {searchQuery.trim() ? "No matching words, numbers, or states found." : "Type a keyword, state number (e.g. 200), sprite group, or sound name to search..."}
+                </div>
+              ) : (
+                searchResults.map((res, i) => (
+                  <div
+                    key={i}
+                    onClick={res.action}
+                    className="pt-2 pb-1 px-3 hover:bg-blue-600/20 hover:border-blue-500/50 border border-transparent rounded cursor-pointer transition-all flex items-center justify-between group"
+                  >
+                    <div className="flex flex-col gap-0.5">
+                      <div className="font-medium text-zinc-200 group-hover:text-blue-300 text-xs flex items-center gap-2">
+                        <span className="px-1.5 py-0.5 bg-zinc-800 text-zinc-400 rounded text-[9px] font-mono">{res.type}</span>
+                        {res.title}
+                      </div>
+                      <div className="text-[10px] text-zinc-500 font-mono">{res.subtitle}</div>
+                    </div>
+                    <span className="text-[10px] text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity font-semibold">Jump to →</span>
+                  </div>
+                ))
+              )}
+            </div>
+            
+            <div className="px-4 py-2 bg-[#161616] border-t border-[#333] text-[10px] text-zinc-500 flex justify-between items-center">
+              <span>Showing up to 50 results</span>
+              <span>Press <kbd className="px-1 bg-zinc-800 rounded text-zinc-300">Esc</kbd> to close</span>
+            </div>
+          </div>
+        </div>
+      )}
 
 
       {/* Palette Import Modal */}

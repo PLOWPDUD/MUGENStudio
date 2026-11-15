@@ -24,6 +24,11 @@ export default function App() {
     setView('editor');
   };
 
+  const handleOpenSavedProject = (projectData: any) => {
+    setInitialData({ type: 'saved_project', timestamp: Date.now(), projectData });
+    setView('editor');
+  };
+
   return (
     <StrictMode>
       {view === 'home' ? (
@@ -31,6 +36,7 @@ export default function App() {
           onNewProject={handleNewProject}
           onOpenZip={handleOpenZip}
           onImportFolder={handleImportFolder}
+          onOpenSavedProject={handleOpenSavedProject}
           onShowDocs={() => setShowDocs(true)}
         />
       ) : (
@@ -38,6 +44,7 @@ export default function App() {
           key={initialData?.timestamp}
           initialAction={initialData?.type} 
           initialFiles={initialData?.files}
+          initialProject={initialData?.projectData}
           onBackToHome={() => setView('home')} 
           onShowDocs={() => setShowDocs(true)}
         />

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { useTranslation } from 'react-i18next';
 import { 
@@ -8,14 +8,18 @@ import {
   Box, 
   HelpCircle, 
   Github,
-  Zap
+  Zap,
+  Clock,
+  Trash2
 } from 'lucide-react';
 import { LanguagePicker } from './LanguagePicker';
+import { getAllProjects, deleteProject, SavedProject } from '../lib/projectStorage';
 
 interface HomeScreenProps {
   onNewProject: () => void;
   onOpenZip: (files: FileList) => void;
   onImportFolder: (files: FileList) => void;
+  onOpenSavedProject: (project: SavedProject) => void;
   onShowDocs: () => void;
 }
 
@@ -23,11 +27,37 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   onNewProject, 
   onOpenZip, 
   onImportFolder,
+  onOpenSavedProject,
   onShowDocs
 }) => {
   const { t } = useTranslation();
   const zipInputRef = React.useRef<HTMLInputElement>(null);
   const folderInputRef = React.useRef<HTMLInputElement>(null);
+  const [savedProjects, setSavedProjects] = useState<SavedProject[]>([]);
+
+  useEffect(() => {
+    const loadSaved = async () => {
+      try {
+        const projects = await getAllProjects();
+        setSavedProjects(projects);
+      } catch (e) {
+        console.error("Failed to load saved projects:", e);
+      }
+    };
+    loadSaved();
+  }, []);
+
+  const handleDeleteProject = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (confirm("Are you sure you want to delete this saved project?")) {
+      try {
+        await deleteProject(id);
+        setSavedProjects(prev => prev.filter(p => p.id !== id));
+      } catch (err) {
+        console.error("Failed to delete project:", err);
+      }
+    }
+  };
 
   const handleZipChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -99,7 +129,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
         </header>
 
         {/* Action Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-24">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-16">
           <ActionCard 
             title={t('home.newCharacter.title')}
             description={t('home.newCharacter.description')}
@@ -123,6 +153,59 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
             delay={0.4}
           />
         </div>
+
+        {/* Saved Projects & Auto-Saves */}
+        {savedProjects.length > 0 && (
+          <div className="mb-24">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+                <Clock className="w-5 h-5 text-purple-400" /> Saved Projects & Auto-Saves
+              </h3>
+              <span className="text-xs text-zinc-500">{savedProjects.length} project(s) stored locally</span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {savedProjects.map((proj) => (
+                <div 
+                  key={proj.id}
+                  onClick={() => onOpenSavedProject(proj)}
+                  className="bg-zinc-900/80 border border-zinc-800 hover:border-purple-500/50 rounded-2xl p-5 transition-all duration-300 cursor-pointer group flex flex-col justify-between"
+                >
+                  <div>
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="w-10 h-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400 group-hover:bg-purple-500 group-hover:text-white transition-colors">
+                        <Box className="w-5 h-5" />
+                      </div>
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400 border border-zinc-700">
+                        {proj.isAutoSave ? 'Auto-Saved' : 'Saved'}
+                      </span>
+                    </div>
+
+                    <h4 className="font-bold text-white text-base mb-1 truncate group-hover:text-purple-300 transition-colors">
+                      {proj.name || 'Untitled Character'}
+                    </h4>
+                    <p className="text-xs text-zinc-500 mb-4">
+                      Updated {new Date(proj.updatedAt).toLocaleString()}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-3 border-t border-zinc-800/80">
+                    <span className="text-xs text-purple-400 font-medium group-hover:underline flex items-center gap-1">
+                      Resume Project →
+                    </span>
+                    <button
+                      onClick={(e) => handleDeleteProject(proj.id, e)}
+                      className="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"
+                      title="Delete Project"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Footer / Info Section */}
         <footer className="pt-12 border-t border-zinc-800 flex flex-col md:flex-row items-center justify-between gap-8">

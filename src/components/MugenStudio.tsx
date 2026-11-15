@@ -17,6 +17,7 @@ import type { SffData, AirData } from '../lib/mugen/types';
 import { parseSndBinary, buildSndBinary } from '../lib/mugen/sndParser';
 import type { SndSound, SndData } from '../lib/mugen/sndParser';
 import { LanguagePicker } from './LanguagePicker';
+import { saveProject, SavedProject } from '../lib/projectStorage';
 
 function generateBeepWav(freq: number, durationMs: number, type: 'sine' | 'square' | 'noise' = 'sine'): Uint8Array {
   const sampleRate = 11025;
@@ -77,8 +78,9 @@ function generateBeepWav(freq: number, durationMs: number, type: 'sine' | 'squar
 }
 
 interface MugenStudioProps {
-  initialAction?: 'new' | 'open_zip' | 'import_folder';
+  initialAction?: 'new' | 'open_zip' | 'import_folder' | 'saved_project';
   initialFiles?: FileList;
+  initialProject?: any;
   onBackToHome?: () => void;
   onShowDocs?: () => void;
   key?: any;
@@ -87,12 +89,17 @@ interface MugenStudioProps {
 export default function MugenStudio({ 
   initialAction, 
   initialFiles,
+  initialProject,
   onBackToHome,
   onShowDocs
 }: MugenStudioProps) {
   const { t, i18n } = useTranslation();
   const [activeMode, setActiveMode] = useState<'Definitions' | 'Sprites' | 'Animations' | 'Commands' | 'States' | 'Sounds' | 'Backgrounds'>('Definitions');
   
+  const [projectId, setProjectId] = useState<string>(() => initialProject?.id || 'proj_' + Date.now());
+  const [lastAutoSavedAt, setLastAutoSavedAt] = useState<Date | null>(null);
+  const [saveNotification, setSaveNotification] = useState<string | null>(null);
+
   // Data State
   const [iniData, setIniData] = useState<Record<string, Record<string, string>> | null>(null);
   
@@ -613,7 +620,7 @@ export default function MugenStudio({
   const [selectedSpriteIdx, setSelectedSpriteIdx] = useState<number>(0);
   const [selectedActionId, setSelectedActionId] = useState<number | null>(null);
   const [selectedPaletteIdx, setSelectedPaletteIdx] = useState<number>(0);
-  const [selectedClsn, setSelectedClsn] = useState<{type: 'clsn1' | 'clsn2', index: number} | null>(null);
+  const [selectedClsn, setSelectedClsn] = useState<{type: 1 | 2, id: number} | null>(null);
   const paletteActInputRef = useRef<HTMLInputElement>(null);
   const renderAreaRef = useRef<HTMLDivElement>(null);
   const [currentFrame, setCurrentFrame] = useState(0);
@@ -678,6 +685,40 @@ export default function MugenStudio({
   const addSoundInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    if (initialProject) {
+      try {
+        const deserialized = deserializeProjectState(initialProject);
+        if (deserialized.iniData) setIniData(deserialized.iniData);
+        if (deserialized.iniRawText) setIniRawText(deserialized.iniRawText);
+        if (deserialized.stFiles && deserialized.stFiles.length > 0) {
+          setStFiles(deserialized.stFiles);
+          setActiveStFileId(deserialized.stFiles[0].id);
+        }
+        if (deserialized.cmdFiles && deserialized.cmdFiles.length > 0) {
+          setCmdFiles(deserialized.cmdFiles);
+          setActiveCmdFileId(deserialized.cmdFiles[0].id);
+        }
+        if (deserialized.airRawText) setAirRawText(deserialized.airRawText);
+        try {
+          if (deserialized.airRawText) {
+            setAirData(parseAirString(deserialized.airRawText));
+          }
+        } catch(e) {}
+        if (deserialized.sffData) {
+          setSffData(deserialized.sffData);
+          setSelectedSpriteIdx(0);
+        }
+        if (deserialized.sndData) setSndData(deserialized.sndData);
+        if (deserialized.actPalette) setActPalette(deserialized.actPalette);
+        setProjectId(deserialized.id);
+        setHistory([{ sff: deserialized.sffData, air: airData }]);
+        setHistoryIndex(0);
+        return;
+      } catch (e) {
+        console.error("Failed to load saved project:", e);
+      }
+    }
+
     // If we have initial files, process them immediately
     if (initialFiles && initialFiles.length > 0) {
       handleFileUpload({ target: { files: initialFiles } } as any);
@@ -760,6 +801,9 @@ export default function MugenStudio({
           e.preventDefault();
           if (e.shiftKey) redo();
           else undo();
+        } else if (e.key === 's') {
+          e.preventDefault();
+          saveProjectToLocalStorage(false);
         } else if (e.key === 'y') {
           e.preventDefault();
           redo();
@@ -798,9 +842,23 @@ export default function MugenStudio({
           setIsSearchModalOpen(prev => !prev);
         }
       } else {
-        if (e.key.toLowerCase() === 'a') {
+        const isInputField = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+        if (!isInputField) {
+          if (e.key.toLowerCase() === 'e' && activeMode === 'Sprites') {
+            setActiveTool('eraser');
+          } else if ((e.key.toLowerCase() === 'b' || e.key.toLowerCase() === 'p') && activeMode === 'Sprites') {
+            setActiveTool('paint');
+          } else if (e.key.toLowerCase() === 'g' && activeMode === 'Sprites') {
+            setActiveTool('bucket');
+          } else if (e.key.toLowerCase() === 'v' || e.key.toLowerCase() === 'm') {
+            setActiveTool('move');
+          } else if (e.key.toLowerCase() === 'h') {
+            setActiveTool('pan');
+          }
+        }
+        if (e.key.toLowerCase() === 'a' && !isInputField) {
           setShowAxis(prev => !prev);
-        } else if (e.key.toLowerCase() === 'c') {
+        } else if (e.key.toLowerCase() === 'c' && !isInputField) {
           setShowClsn(prev => !prev);
         } else if (e.key === 'Escape') {
           if (isSearchModalOpen) {
@@ -848,6 +906,79 @@ export default function MugenStudio({
     window.addEventListener('mousedown', handleClickOutside);
     return () => window.removeEventListener('mousedown', handleClickOutside);
   }, [activeDropdown]);
+
+  // Deserialization helper for loaded projects (handles both direct TypedArrays and legacy array formats)
+  const deserializeProjectState = (data: any) => {
+    const deserializedSff = data.sffData ? {
+      ...data.sffData,
+      images: data.sffData.images.map((img: any) => ({
+        ...img,
+        pixelIndices: img.pixelIndices instanceof Uint8Array ? img.pixelIndices : new Uint8Array(img.pixelIndices || []),
+        palette: img.palette ? (img.palette instanceof Uint8Array ? img.palette : new Uint8Array(img.palette)) : undefined
+      })),
+      palettes: data.sffData.palettes?.map((pal: any) => ({
+        ...pal,
+        data: pal.data instanceof Uint8Array ? pal.data : new Uint8Array(pal.data || [])
+      }))
+    } : null;
+
+    const deserializedSnd = data.sndData ? {
+      ...data.sndData,
+      sounds: data.sndData.sounds.map((snd: any) => ({
+        ...snd,
+        data: snd.data instanceof Uint8Array ? snd.data : new Uint8Array(snd.data || [])
+      }))
+    } : null;
+
+    const deserializedPalette = data.actPalette ? (
+      data.actPalette instanceof Uint8Array ? data.actPalette : new Uint8Array(data.actPalette)
+    ) : null;
+
+    return {
+      ...data,
+      sffData: deserializedSff,
+      sndData: deserializedSnd,
+      actPalette: deserializedPalette
+    };
+  };
+
+  const saveProjectToLocalStorage = async (isAuto: boolean = false) => {
+    try {
+      const projectName = iniData?.Info?.name || 'Untitled Character';
+      const projectState: SavedProject = {
+        id: projectId,
+        name: projectName,
+        updatedAt: Date.now(),
+        isAutoSave: isAuto,
+        iniData,
+        iniRawText,
+        stFiles,
+        cmdFiles,
+        airRawText,
+        sffData,
+        sndData,
+        actPalette
+      };
+
+      await saveProject(projectState);
+      setLastAutoSavedAt(new Date());
+      
+      if (!isAuto) {
+        setSaveNotification("Project saved to local storage successfully!");
+        setTimeout(() => setSaveNotification(null), 3000);
+      }
+    } catch (err) {
+      console.error("Failed to save project:", err);
+    }
+  };
+
+  // 30-second auto-save interval
+  useEffect(() => {
+    const interval = setInterval(() => {
+      saveProjectToLocalStorage(true);
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [projectId, iniData, iniRawText, stFiles, cmdFiles, airRawText, sffData, sndData, actPalette]);
 
   useEffect(() => {
     if (airData && Object.keys(airData.actions).length > 0) {
@@ -1876,20 +2007,27 @@ export default function MugenStudio({
     const action = airData.actions[selectedActionId];
     if (!action) return;
 
-    const nextAir = { ...airData };
-    const nextAction = { ...action };
     const boxId = Math.floor(Math.random() * 100000);
     const newBox = { id: boxId, x1: -30, y1: -60, x2: 30, y2: 10 };
-    
-    if (clsnType === 1) {
-      nextAction.clsn1 = [...nextAction.clsn1, newBox];
-    } else {
-      nextAction.clsn2 = [...nextAction.clsn2, newBox];
-    }
 
-    nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
-    setAirData(nextAir);
-    syncAirRawText(nextAir);
+    setAirData(prevAir => {
+      if (!prevAir || selectedActionId === null) return prevAir;
+      const act = prevAir.actions[selectedActionId];
+      if (!act) return prevAir;
+
+      const nextAir = { ...prevAir };
+      const nextAction = { ...act };
+      if (clsnType === 1) {
+        nextAction.clsn1 = [...nextAction.clsn1, newBox];
+      } else {
+        nextAction.clsn2 = [...nextAction.clsn2, newBox];
+      }
+      nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
+      syncAirRawText(nextAir);
+      return nextAir;
+    });
+
+    setSelectedClsn({ type: clsnType, id: boxId });
   };
 
   const handleDeleteCollisionBox = (clsnType: 1 | 2, boxId: number) => {
@@ -1897,37 +2035,61 @@ export default function MugenStudio({
     const action = airData.actions[selectedActionId];
     if (!action) return;
 
-    const nextAir = { ...airData };
-    const nextAction = { ...action };
+    setAirData(prevAir => {
+      if (!prevAir || selectedActionId === null) return prevAir;
+      const act = prevAir.actions[selectedActionId];
+      if (!act) return prevAir;
 
-    if (clsnType === 1) {
-      nextAction.clsn1 = nextAction.clsn1.filter((b: any) => b.id !== boxId);
-    } else {
-      nextAction.clsn2 = nextAction.clsn2.filter((b: any) => b.id !== boxId);
+      const nextAir = { ...prevAir };
+      const nextAction = { ...act };
+      if (clsnType === 1) {
+        nextAction.clsn1 = nextAction.clsn1.filter((b: any) => b.id !== boxId);
+      } else {
+        nextAction.clsn2 = nextAction.clsn2.filter((b: any) => b.id !== boxId);
+      }
+      nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
+      syncAirRawText(nextAir);
+      return nextAir;
+    });
+
+    if (selectedClsn?.type === clsnType && selectedClsn?.id === boxId) {
+      setSelectedClsn(null);
     }
-
-    nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
-    setAirData(nextAir);
-    syncAirRawText(nextAir);
   };
 
-  const handleUpdateCollisionBox = (clsnType: 1 | 2, boxId: number, field: string, value: number) => {
-    if (!airData || selectedActionId === null) return;
-    const action = airData.actions[selectedActionId];
-    if (!action) return;
+  const handleUpdateCollisionBox = (clsnType: 1 | 2, boxId: number, fieldOrUpdates: string | Record<string, number>, value?: number) => {
+    setAirData(prevAir => {
+      if (!prevAir || selectedActionId === null) return prevAir;
+      const act = prevAir.actions[selectedActionId];
+      if (!act) return prevAir;
 
-    const nextAir = { ...airData };
-    const nextAction = { ...action };
+      const nextAir = { ...prevAir };
+      const nextAction = { ...act };
 
-    if (clsnType === 1) {
-      nextAction.clsn1 = nextAction.clsn1.map((b: any) => b.id === boxId ? { ...b, [field]: value } : b);
-    } else {
-      nextAction.clsn2 = nextAction.clsn2.map((b: any) => b.id === boxId ? { ...b, [field]: value } : b);
-    }
+      const updateBoxObj = (b: any) => {
+        if (b.id !== boxId) return b;
+        if (typeof fieldOrUpdates === 'object') {
+          return { ...b, ...fieldOrUpdates };
+        }
+        if (fieldOrUpdates === 'w') {
+          return { ...b, x2: b.x1 + Math.max(1, value ?? 1) };
+        }
+        if (fieldOrUpdates === 'h') {
+          return { ...b, y2: b.y1 + Math.max(1, value ?? 1) };
+        }
+        return { ...b, [fieldOrUpdates]: value };
+      };
 
-    nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
-    setAirData(nextAir);
-    syncAirRawText(nextAir);
+      if (clsnType === 1) {
+        nextAction.clsn1 = nextAction.clsn1.map(updateBoxObj);
+      } else {
+        nextAction.clsn2 = nextAction.clsn2.map(updateBoxObj);
+      }
+
+      nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
+      syncAirRawText(nextAir);
+      return nextAir;
+    });
   };
 
   const handleLinkSpriteToFrame = (group: number, image: number) => {
@@ -2496,6 +2658,20 @@ export default function MugenStudio({
          </div>
          <div className="w-[1px] h-4 bg-zinc-800 mx-1" />
          <button 
+           onClick={() => saveProjectToLocalStorage(false)}
+           className="px-2 py-0.5 cursor-pointer transition-colors text-xs text-purple-300 hover:text-white bg-purple-950/40 hover:bg-purple-900/60 border border-purple-700/50 rounded flex items-center gap-1.5 font-medium shrink-0"
+           title="Save project state (Home Screen)"
+         >
+           <Save size={12} className="text-purple-400" />
+           <span>Save Project</span>
+         </button>
+         {lastAutoSavedAt && (
+           <span className="text-[10px] text-zinc-500 font-mono hidden sm:inline px-1">
+             Auto-saved {lastAutoSavedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+           </span>
+         )}
+         <div className="w-[1px] h-4 bg-zinc-800 mx-1" />
+         <button 
            onClick={onShowDocs}
            className="px-2 py-1 cursor-pointer transition-colors text-zinc-400 hover:text-white hover:bg-white/5 rounded flex items-center justify-center"
            title="Help & Documentation"
@@ -2509,7 +2685,16 @@ export default function MugenStudio({
       <div className="flex items-center gap-1 px-2 py-1 border-b border-[#111111] overflow-x-auto whitespace-nowrap shrink-0 max-w-[100vw]" style={{ background: 'linear-gradient(to bottom, #4a4a4a, #2f2f2f)' }}>
         <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.new') || 'New'} onClick={handleCreateNew}><FileIcon size={16} color="#4ade80" /></button>
         <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.open') || 'Open'} onClick={() => fileInputRef.current?.click()}><FolderOpen size={16} color="#60a5fa" /></button>
-        <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.save') || 'Save'} onClick={handleSave}><Save size={16} color="#60a5fa" /></button>
+        <button 
+          className="p-1.5 hover:bg-white/10 rounded shrink-0" 
+          title="Save Project & Export (Ctrl+S)" 
+          onClick={() => {
+            saveProjectToLocalStorage(false);
+            handleSave();
+          }}
+        >
+          <Save size={16} color="#c084fc" />
+        </button>
         <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('common.export') || 'Export Character to ZIP'} onClick={() => setShowExportZipModal(true)}><Download size={16} color="#4ade80" /></button>
         <div className="w-px h-6 bg-[#1a1a1a] mx-1 shrink-0" />
         <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.undo') || 'Undo'} onClick={undo}><Undo size={16} color="#f87171" /></button>
@@ -3389,101 +3574,260 @@ export default function MugenStudio({
                                     </button>
                                 </div>
 
-                                <div className="max-h-48 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 text-[10px] mt-1 flex flex-col gap-2 font-mono">
+                                <div className="max-h-56 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 text-[10px] mt-1 flex flex-col gap-2 font-mono">
                                     {/* Defensive Box rows */}
-                                    {airData.actions[selectedActionId].clsn2.map((box, idx) => (
-                                        <div key={`c2-${idx}`} className="flex flex-col bg-blue-950/20 p-1.5 rounded border border-blue-900/30 gap-1.5">
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-blue-400 font-bold">🛡️ Defensive Box #{idx}</span>
-                                                <button onClick={() => handleDeleteCollisionBox(2, box.id)} className="text-red-500 hover:text-red-400 font-bold bg-[#222] px-1.5 rounded">DELETE</button>
+                                    {airData.actions[selectedActionId].clsn2.map((box, idx) => {
+                                        const isSelected = selectedClsn?.type === 2 && selectedClsn?.id === box.id;
+                                        const boxW = Math.abs(box.x2 - box.x1);
+                                        const boxH = Math.abs(box.y2 - box.y1);
+                                        return (
+                                            <div 
+                                                key={`c2-${idx}`} 
+                                                onClick={() => setSelectedClsn({ type: 2, id: box.id })}
+                                                className={`flex flex-col bg-blue-950/20 p-1.5 rounded border transition-all cursor-pointer ${
+                                                    isSelected ? 'border-blue-500 shadow-md shadow-blue-500/20 bg-blue-900/30 ring-1 ring-blue-500/50' : 'border-blue-900/30 hover:border-blue-800'
+                                                } gap-1.5`}
+                                            >
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-blue-400 font-bold flex items-center gap-1">
+                                                        <span>🛡️ Defensive Box #{idx}</span>
+                                                        {isSelected && <span className="text-[8px] bg-blue-500 text-white px-1 py-0.2 rounded font-sans font-semibold">SELECTED</span>}
+                                                    </span>
+                                                    <button 
+                                                        onClick={(e) => { e.stopPropagation(); handleDeleteCollisionBox(2, box.id); }} 
+                                                        className="text-red-500 hover:text-red-400 font-bold bg-[#222] px-1.5 rounded hover:bg-[#333] transition-colors"
+                                                    >
+                                                        DELETE
+                                                    </button>
+                                                </div>
+
+                                                {/* Coordinates: X1, Y1, X2, Y2 */}
+                                                <div className="grid grid-cols-2 gap-1.5" onClick={e => e.stopPropagation()}>
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <span className="text-[8px] text-gray-500">X1 (Left)</span>
+                                                        <input 
+                                                            type="number" 
+                                                            className="w-full bg-black border border-[#333] text-blue-400 px-1 py-0.5 text-[9px] rounded font-mono"
+                                                            value={box.x1}
+                                                            onChange={e => handleUpdateCollisionBox(2, box.id, 'x1', parseInt(e.target.value) || 0)}
+                                                        />
+                                                    </div>
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <span className="text-[8px] text-gray-500">Y1 (Top)</span>
+                                                        <input 
+                                                            type="number" 
+                                                            className="w-full bg-black border border-[#333] text-blue-400 px-1 py-0.5 text-[9px] rounded font-mono"
+                                                            value={box.y1}
+                                                            onChange={e => handleUpdateCollisionBox(2, box.id, 'y1', parseInt(e.target.value) || 0)}
+                                                        />
+                                                    </div>
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <span className="text-[8px] text-gray-500">X2 (Right)</span>
+                                                        <input 
+                                                            type="number" 
+                                                            className="w-full bg-black border border-[#333] text-blue-400 px-1 py-0.5 text-[9px] rounded font-mono"
+                                                            value={box.x2}
+                                                            onChange={e => handleUpdateCollisionBox(2, box.id, 'x2', parseInt(e.target.value) || 0)}
+                                                        />
+                                                    </div>
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <span className="text-[8px] text-gray-500">Y2 (Bottom)</span>
+                                                        <input 
+                                                            type="number" 
+                                                            className="w-full bg-black border border-[#333] text-blue-400 px-1 py-0.5 text-[9px] rounded font-mono"
+                                                            value={box.y2}
+                                                            onChange={e => handleUpdateCollisionBox(2, box.id, 'y2', parseInt(e.target.value) || 0)}
+                                                        />
+                                                    </div>
+                                                </div>
+
+                                                {/* Width alongside Height Resize Controls */}
+                                                <div className="grid grid-cols-2 gap-1.5 pt-1 mt-0.5 border-t border-blue-900/30 bg-black/40 p-1.5 rounded" onClick={e => e.stopPropagation()}>
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <div className="flex items-center justify-between text-[8px] text-blue-300 font-bold">
+                                                            <span>Width (W)</span>
+                                                            <span className="font-mono text-gray-400">{boxW}px</span>
+                                                        </div>
+                                                        <div className="flex items-center gap-1">
+                                                            <button 
+                                                                type="button" 
+                                                                onClick={() => handleUpdateCollisionBox(2, box.id, 'w', Math.max(1, boxW - 5))}
+                                                                className="px-1 py-0.5 bg-[#222] hover:bg-[#333] text-blue-400 rounded text-[9px] border border-[#444]"
+                                                                title="Decrease width by 5px"
+                                                            >-5</button>
+                                                            <input 
+                                                                type="number" 
+                                                                className="w-full bg-black border border-blue-800/50 text-blue-300 px-1 py-0.5 text-[9px] rounded font-mono text-center focus:border-blue-400"
+                                                                value={boxW}
+                                                                min="1"
+                                                                onChange={e => handleUpdateCollisionBox(2, box.id, 'w', Math.max(1, parseInt(e.target.value) || 1))}
+                                                            />
+                                                            <button 
+                                                                type="button" 
+                                                                onClick={() => handleUpdateCollisionBox(2, box.id, 'w', boxW + 5)}
+                                                                className="px-1 py-0.5 bg-[#222] hover:bg-[#333] text-blue-400 rounded text-[9px] border border-[#444]"
+                                                                title="Increase width by 5px"
+                                                            >+5</button>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <div className="flex items-center justify-between text-[8px] text-blue-300 font-bold">
+                                                            <span>Height (H)</span>
+                                                            <span className="font-mono text-gray-400">{boxH}px</span>
+                                                        </div>
+                                                        <div className="flex items-center gap-1">
+                                                            <button 
+                                                                type="button" 
+                                                                onClick={() => handleUpdateCollisionBox(2, box.id, 'h', Math.max(1, boxH - 5))}
+                                                                className="px-1 py-0.5 bg-[#222] hover:bg-[#333] text-blue-400 rounded text-[9px] border border-[#444]"
+                                                                title="Decrease height by 5px"
+                                                            >-5</button>
+                                                            <input 
+                                                                type="number" 
+                                                                className="w-full bg-black border border-blue-800/50 text-blue-300 px-1 py-0.5 text-[9px] rounded font-mono text-center focus:border-blue-400"
+                                                                value={boxH}
+                                                                min="1"
+                                                                onChange={e => handleUpdateCollisionBox(2, box.id, 'h', Math.max(1, parseInt(e.target.value) || 1))}
+                                                            />
+                                                            <button 
+                                                                type="button" 
+                                                                onClick={() => handleUpdateCollisionBox(2, box.id, 'h', boxH + 5)}
+                                                                className="px-1 py-0.5 bg-[#222] hover:bg-[#333] text-blue-400 rounded text-[9px] border border-[#444]"
+                                                                title="Increase height by 5px"
+                                                            >+5</button>
+                                                        </div>
+                                                    </div>
+                                                </div>
                                             </div>
-                                            <div className="grid grid-cols-2 gap-1.5">
-                                                <div className="flex flex-col gap-0.5">
-                                                    <span className="text-[8px] text-gray-500">X1 (Left)</span>
-                                                    <input 
-                                                        type="number" 
-                                                        className="w-full bg-black border border-[#333] text-blue-400 px-1 py-0.5 text-[9px] rounded"
-                                                        value={box.x1}
-                                                        onChange={e => handleUpdateCollisionBox(2, box.id, 'x1', parseInt(e.target.value) || 0)}
-                                                    />
-                                                </div>
-                                                <div className="flex flex-col gap-0.5">
-                                                    <span className="text-[8px] text-gray-500">Y1 (Top)</span>
-                                                    <input 
-                                                        type="number" 
-                                                        className="w-full bg-black border border-[#333] text-blue-400 px-1 py-0.5 text-[9px] rounded"
-                                                        value={box.y1}
-                                                        onChange={e => handleUpdateCollisionBox(2, box.id, 'y1', parseInt(e.target.value) || 0)}
-                                                    />
-                                                </div>
-                                                <div className="flex flex-col gap-0.5">
-                                                    <span className="text-[8px] text-gray-500">X2 (Right)</span>
-                                                    <input 
-                                                        type="number" 
-                                                        className="w-full bg-black border border-[#333] text-blue-400 px-1 py-0.5 text-[9px] rounded"
-                                                        value={box.x2}
-                                                        onChange={e => handleUpdateCollisionBox(2, box.id, 'x2', parseInt(e.target.value) || 0)}
-                                                    />
-                                                </div>
-                                                <div className="flex flex-col gap-0.5">
-                                                    <span className="text-[8px] text-gray-500">Y2 (Bottom)</span>
-                                                    <input 
-                                                        type="number" 
-                                                        className="w-full bg-black border border-[#333] text-blue-400 px-1 py-0.5 text-[9px] rounded"
-                                                        value={box.y2}
-                                                        onChange={e => handleUpdateCollisionBox(2, box.id, 'y2', parseInt(e.target.value) || 0)}
-                                                    />
-                                                </div>
-                                            </div>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
+
                                     {/* Attack Box rows */}
-                                    {airData.actions[selectedActionId].clsn1.map((box, idx) => (
-                                        <div key={`c1-${idx}`} className="flex flex-col bg-red-955/10 p-1.5 rounded border border-red-900/30 gap-1.5">
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-red-400 font-bold">⚔️ Attack Box #{idx}</span>
-                                                <button onClick={() => handleDeleteCollisionBox(1, box.id)} className="text-red-500 hover:text-red-400 font-bold bg-[#222] px-1.5 rounded">DELETE</button>
+                                    {airData.actions[selectedActionId].clsn1.map((box, idx) => {
+                                        const isSelected = selectedClsn?.type === 1 && selectedClsn?.id === box.id;
+                                        const boxW = Math.abs(box.x2 - box.x1);
+                                        const boxH = Math.abs(box.y2 - box.y1);
+                                        return (
+                                            <div 
+                                                key={`c1-${idx}`} 
+                                                onClick={() => setSelectedClsn({ type: 1, id: box.id })}
+                                                className={`flex flex-col bg-red-955/10 p-1.5 rounded border transition-all cursor-pointer ${
+                                                    isSelected ? 'border-red-500 shadow-md shadow-red-500/20 bg-red-900/25 ring-1 ring-red-500/50' : 'border-red-900/30 hover:border-red-800'
+                                                } gap-1.5`}
+                                            >
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-red-400 font-bold flex items-center gap-1">
+                                                        <span>⚔️ Attack Box #{idx}</span>
+                                                        {isSelected && <span className="text-[8px] bg-red-600 text-white px-1 py-0.2 rounded font-sans font-semibold">SELECTED</span>}
+                                                    </span>
+                                                    <button 
+                                                        onClick={(e) => { e.stopPropagation(); handleDeleteCollisionBox(1, box.id); }} 
+                                                        className="text-red-500 hover:text-red-400 font-bold bg-[#222] px-1.5 rounded hover:bg-[#333] transition-colors"
+                                                    >
+                                                        DELETE
+                                                    </button>
+                                                </div>
+
+                                                {/* Coordinates: X1, Y1, X2, Y2 */}
+                                                <div className="grid grid-cols-2 gap-1.5" onClick={e => e.stopPropagation()}>
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <span className="text-[8px] text-gray-500">X1 (Left)</span>
+                                                        <input 
+                                                            type="number" 
+                                                            className="w-full bg-black border border-[#333] text-red-400 px-1 py-0.5 text-[9px] rounded font-mono"
+                                                            value={box.x1}
+                                                            onChange={e => handleUpdateCollisionBox(1, box.id, 'x1', parseInt(e.target.value) || 0)}
+                                                        />
+                                                    </div>
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <span className="text-[8px] text-gray-500">Y1 (Top)</span>
+                                                        <input 
+                                                            type="number" 
+                                                            className="w-full bg-black border border-[#333] text-red-400 px-1 py-0.5 text-[9px] rounded font-mono"
+                                                            value={box.y1}
+                                                            onChange={e => handleUpdateCollisionBox(1, box.id, 'y1', parseInt(e.target.value) || 0)}
+                                                        />
+                                                    </div>
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <span className="text-[8px] text-gray-500">X2 (Right)</span>
+                                                        <input 
+                                                            type="number" 
+                                                            className="w-full bg-black border border-[#333] text-red-400 px-1 py-0.5 text-[9px] rounded font-mono"
+                                                            value={box.x2}
+                                                            onChange={e => handleUpdateCollisionBox(1, box.id, 'x2', parseInt(e.target.value) || 0)}
+                                                        />
+                                                    </div>
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <span className="text-[8px] text-gray-500">Y2 (Bottom)</span>
+                                                        <input 
+                                                            type="number" 
+                                                            className="w-full bg-black border border-[#333] text-red-400 px-1 py-0.5 text-[9px] rounded font-mono"
+                                                            value={box.y2}
+                                                            onChange={e => handleUpdateCollisionBox(1, box.id, 'y2', parseInt(e.target.value) || 0)}
+                                                        />
+                                                    </div>
+                                                </div>
+
+                                                {/* Width alongside Height Resize Controls */}
+                                                <div className="grid grid-cols-2 gap-1.5 pt-1 mt-0.5 border-t border-red-900/30 bg-black/40 p-1.5 rounded" onClick={e => e.stopPropagation()}>
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <div className="flex items-center justify-between text-[8px] text-red-300 font-bold">
+                                                            <span>Width (W)</span>
+                                                            <span className="font-mono text-gray-400">{boxW}px</span>
+                                                        </div>
+                                                        <div className="flex items-center gap-1">
+                                                            <button 
+                                                                type="button" 
+                                                                onClick={() => handleUpdateCollisionBox(1, box.id, 'w', Math.max(1, boxW - 5))}
+                                                                className="px-1 py-0.5 bg-[#222] hover:bg-[#333] text-red-400 rounded text-[9px] border border-[#444]"
+                                                                title="Decrease width by 5px"
+                                                            >-5</button>
+                                                            <input 
+                                                                type="number" 
+                                                                className="w-full bg-black border border-red-800/50 text-red-300 px-1 py-0.5 text-[9px] rounded font-mono text-center focus:border-red-400"
+                                                                value={boxW}
+                                                                min="1"
+                                                                onChange={e => handleUpdateCollisionBox(1, box.id, 'w', Math.max(1, parseInt(e.target.value) || 1))}
+                                                            />
+                                                            <button 
+                                                                type="button" 
+                                                                onClick={() => handleUpdateCollisionBox(1, box.id, 'w', boxW + 5)}
+                                                                className="px-1 py-0.5 bg-[#222] hover:bg-[#333] text-red-400 rounded text-[9px] border border-[#444]"
+                                                                title="Increase width by 5px"
+                                                            >+5</button>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <div className="flex items-center justify-between text-[8px] text-red-300 font-bold">
+                                                            <span>Height (H)</span>
+                                                            <span className="font-mono text-gray-400">{boxH}px</span>
+                                                        </div>
+                                                        <div className="flex items-center gap-1">
+                                                            <button 
+                                                                type="button" 
+                                                                onClick={() => handleUpdateCollisionBox(1, box.id, 'h', Math.max(1, boxH - 5))}
+                                                                className="px-1 py-0.5 bg-[#222] hover:bg-[#333] text-red-400 rounded text-[9px] border border-[#444]"
+                                                                title="Decrease height by 5px"
+                                                            >-5</button>
+                                                            <input 
+                                                                type="number" 
+                                                                className="w-full bg-black border border-red-800/50 text-red-300 px-1 py-0.5 text-[9px] rounded font-mono text-center focus:border-red-400"
+                                                                value={boxH}
+                                                                min="1"
+                                                                onChange={e => handleUpdateCollisionBox(1, box.id, 'h', Math.max(1, parseInt(e.target.value) || 1))}
+                                                            />
+                                                            <button 
+                                                                type="button" 
+                                                                onClick={() => handleUpdateCollisionBox(1, box.id, 'h', boxH + 5)}
+                                                                className="px-1 py-0.5 bg-[#222] hover:bg-[#333] text-red-400 rounded text-[9px] border border-[#444]"
+                                                                title="Increase height by 5px"
+                                                            >+5</button>
+                                                        </div>
+                                                    </div>
+                                                </div>
                                             </div>
-                                            <div className="grid grid-cols-2 gap-1.5">
-                                                <div className="flex flex-col gap-0.5">
-                                                    <span className="text-[8px] text-gray-500">X1 (Left)</span>
-                                                    <input 
-                                                        type="number" 
-                                                        className="w-full bg-black border border-[#333] text-red-400 px-1 py-0.5 text-[9px] rounded"
-                                                        value={box.x1}
-                                                        onChange={e => handleUpdateCollisionBox(1, box.id, 'x1', parseInt(e.target.value) || 0)}
-                                                    />
-                                                </div>
-                                                <div className="flex flex-col gap-0.5">
-                                                    <span className="text-[8px] text-gray-500">Y1 (Top)</span>
-                                                    <input 
-                                                        type="number" 
-                                                        className="w-full bg-black border border-[#333] text-red-400 px-1 py-0.5 text-[9px] rounded"
-                                                        value={box.y1}
-                                                        onChange={e => handleUpdateCollisionBox(1, box.id, 'y1', parseInt(e.target.value) || 0)}
-                                                    />
-                                                </div>
-                                                <div className="flex flex-col gap-0.5">
-                                                    <span className="text-[8px] text-gray-500">X2 (Right)</span>
-                                                    <input 
-                                                        type="number" 
-                                                        className="w-full bg-black border border-[#333] text-red-400 px-1 py-0.5 text-[9px] rounded"
-                                                        value={box.x2}
-                                                        onChange={e => handleUpdateCollisionBox(1, box.id, 'x2', parseInt(e.target.value) || 0)}
-                                                    />
-                                                </div>
-                                                <div className="flex flex-col gap-0.5">
-                                                    <span className="text-[8px] text-gray-500">Y2 (Bottom)</span>
-                                                    <input 
-                                                        type="number" 
-                                                        className="w-full bg-black border border-[#333] text-red-400 px-1 py-0.5 text-[9px] rounded"
-                                                        value={box.y2}
-                                                        onChange={e => handleUpdateCollisionBox(1, box.id, 'y2', parseInt(e.target.value) || 0)}
-                                                    />
-                                                </div>
-                                            </div>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                     {airData.actions[selectedActionId].clsn1.length === 0 && airData.actions[selectedActionId].clsn2.length === 0 && (
                                         <span className="text-gray-500 italic text-[9px] block text-center p-1">No custom boxes</span>
                                     )}
@@ -3762,10 +4106,17 @@ export default function MugenStudio({
                         </button>
                         <button 
                             onClick={() => setActiveTool('eraser')} 
-                            className={`p-1.5 rounded ${activeTool === 'eraser' ? 'bg-[#444] shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
-                            title="Erase (Draw Index 0)"
+                            className={`p-1.5 rounded transition-colors ${activeTool === 'eraser' ? 'bg-amber-600 shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
+                            title="Eraser Tool (E) - Erase Pixels"
                         >
-                            <div className="w-4 h-4 rounded-sm outline outline-1 outline-current flex items-center justify-center opacity-80" style={{ backgroundImage: 'linear-gradient(45deg, #ccc 25%, transparent 25%), linear-gradient(-45deg, #ccc 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #ccc 75%), linear-gradient(-45deg, transparent 75%, #ccc 75%)', backgroundSize: '4px 4px', backgroundPosition: '0 0, 0 2px, 2px -2px, -2px 0px' }} />
+                            <Eraser size={16} />
+                        </button>
+                        <button 
+                            onClick={() => setActiveTool('select')} 
+                            className={`p-1.5 rounded transition-colors ${activeTool === 'select' ? 'bg-blue-600 shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
+                            title="Select Rectangle Area (Ctrl+C to Copy)"
+                        >
+                            <Square size={16} />
                         </button>
                      </>
                  )}
@@ -4066,41 +4417,79 @@ export default function MugenStudio({
                     {/* Overlay info tooltip */}
                     <div className="absolute top-7 left-10 bg-[#151515]/95 border border-[#444] px-3 py-1.5 rounded shadow-lg text-[10px] text-gray-300 pointer-events-none flex flex-col gap-0.5 z-50">
                         <span className="font-bold text-blue-400">
-                            {activeMode === 'Sprites' && activeTool !== 'move' ? '🖌️ Interactive Pixel Drawing' : '💡 Interactive Canvas Pivot Calibration'}
+                            {activeMode === 'Sprites' && activeTool === 'eraser'
+                                ? '🧹 Interactive Pixel Eraser'
+                                : activeMode === 'Sprites' && activeTool !== 'move'
+                                ? '🖌️ Interactive Pixel Drawing'
+                                : '💡 Interactive Canvas Pivot Calibration'}
                         </span>
                         <span>
-                            {activeMode === 'Sprites' && activeTool !== 'move' 
+                            {activeMode === 'Sprites' && activeTool === 'eraser'
+                                ? 'Click and drag on the sprite to erase pixels back to transparent background (Color Index 0).'
+                                : activeMode === 'Sprites' && activeTool !== 'move' 
                                 ? 'Click on the sprite to paint pixels using the active palette color. Index 0 is transparent.' 
                                 : 'Click and drag the sprite image with your mouse on the stage wrapper to adjust pivot alignment offsets seamlessly in real time!'}
                         </span>
                     </div>
 
-                    {/* Floating brush size settings card */}
+                    {/* Floating brush & eraser size settings card */}
                     {activeMode === 'Sprites' && (activeTool === 'paint' || activeTool === 'eraser') && (
-                        <div className="absolute bottom-6 right-6 bg-[#1a1a1a]/95 border border-[#444] rounded-lg p-3 shadow-2xl z-20 flex flex-col gap-2 w-48 text-gray-300" onMouseDown={e => e.stopPropagation()} onMouseMove={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()} onTouchMove={e => e.stopPropagation()}>
+                        <div className="absolute bottom-6 right-6 bg-[#1a1a1a]/95 border border-[#444] rounded-lg p-3 shadow-2xl z-20 flex flex-col gap-2 w-52 text-gray-300" onMouseDown={e => e.stopPropagation()} onMouseMove={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()} onTouchMove={e => e.stopPropagation()}>
                             <div className="flex items-center justify-between">
-                                <span className="text-xs font-bold text-gray-200">Brush Settings</span>
-                                <span className="text-[10px] bg-blue-600/30 text-blue-400 font-mono px-1.5 py-0.5 rounded font-bold border border-blue-500/20">{brushSize}px</span>
+                                <div className="flex items-center gap-1.5 font-bold text-xs">
+                                    {activeTool === 'eraser' ? <Eraser size={14} className="text-amber-400" /> : <Pen size={14} className="text-blue-400" />}
+                                    <span className="text-gray-200">{activeTool === 'eraser' ? 'Eraser Tool' : 'Brush Settings'}</span>
+                                </div>
+                                <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded font-bold border ${activeTool === 'eraser' ? 'bg-amber-600/30 text-amber-400 border-amber-500/20' : 'bg-blue-600/30 text-blue-400 border-blue-500/20'}`}>
+                                    {brushSize}px
+                                </span>
                             </div>
-                            <input 
-                                type="range" 
-                                min="1" 
-                                max="20" 
-                                value={brushSize} 
-                                onChange={(e) => setBrushSize(parseInt(e.target.value) || 1)}
-                                className="w-full h-1.5 bg-[#444] rounded-lg appearance-none cursor-pointer accent-blue-500"
-                            />
-                            <div className="flex justify-between text-[9px] text-gray-400">
-                                <span>1px</span>
-                                <span>10px</span>
-                                <span>20px</span>
+
+                            {/* Quick tool switcher between Pen and Eraser */}
+                            <div className="flex gap-1 bg-[#111] p-0.5 rounded border border-[#333]">
+                                <button
+                                    onClick={() => setActiveTool('paint')}
+                                    className={`flex-1 py-1 rounded text-[10px] font-semibold flex items-center justify-center gap-1 transition-all ${
+                                        activeTool === 'paint' ? 'bg-blue-600 text-white shadow' : 'text-gray-400 hover:text-white'
+                                    }`}
+                                >
+                                    <Pen size={10} /> Pen (B)
+                                </button>
+                                <button
+                                    onClick={() => setActiveTool('eraser')}
+                                    className={`flex-1 py-1 rounded text-[10px] font-semibold flex items-center justify-center gap-1 transition-all ${
+                                        activeTool === 'eraser' ? 'bg-amber-600 text-white shadow' : 'text-gray-400 hover:text-white'
+                                    }`}
+                                >
+                                    <Eraser size={10} /> Eraser (E)
+                                </button>
                             </div>
-                            <div className="flex gap-1 justify-between mt-1 pt-1.5 border-t border-[#333]">
-                                {[1, 2, 3, 5, 8].map(sz => (
+
+                            <div className="flex flex-col gap-1">
+                                <div className="flex justify-between text-[9px] text-gray-400">
+                                    <span>Size:</span>
+                                    <span className="font-mono text-gray-300">{brushSize}px</span>
+                                </div>
+                                <input 
+                                    type="range" 
+                                    min="1" 
+                                    max="20" 
+                                    value={brushSize} 
+                                    onChange={(e) => setBrushSize(parseInt(e.target.value) || 1)}
+                                    className="w-full h-1.5 bg-[#444] rounded-lg appearance-none cursor-pointer accent-blue-500"
+                                />
+                                <div className="flex justify-between text-[9px] text-gray-400">
+                                    <span>1px</span>
+                                    <span>10px</span>
+                                    <span>20px</span>
+                                </div>
+                            </div>
+                            <div className="flex gap-1 justify-between pt-1 border-t border-[#333]">
+                                {[1, 2, 3, 5, 8, 12].map(sz => (
                                     <button
                                         key={sz}
                                         onClick={() => setBrushSize(sz)}
-                                        className={`flex-1 text-[9px] py-1 rounded border transition-all ${brushSize === sz ? 'bg-blue-600 text-white border-blue-500 font-bold' : 'bg-[#333] hover:bg-[#444] border-[#444] text-gray-400'}`}
+                                        className={`flex-1 text-[9px] py-1 rounded border transition-all ${brushSize === sz ? (activeTool === 'eraser' ? 'bg-amber-600 text-white border-amber-500 font-bold' : 'bg-blue-600 text-white border-blue-500 font-bold') : 'bg-[#333] hover:bg-[#444] border-[#444] text-gray-400'}`}
                                     >
                                         {sz}px
                                     </button>
@@ -4827,6 +5216,13 @@ export default function MugenStudio({
         </div>
       )}
 
+      {/* Save Notification Toast */}
+      {saveNotification && (
+        <div className="fixed bottom-4 right-4 z-[9999] bg-green-600 text-white px-4 py-2 rounded-lg shadow-xl text-xs font-medium animate-in fade-in slide-in-from-bottom-2">
+          {saveNotification}
+        </div>
+      )}
+
     </div>
   );
 }
@@ -5002,10 +5398,12 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
     activeTool: string,
     selectedClsn: { type: 1 | 2; id: number } | null,
     setSelectedClsn: (val: { type: 1 | 2; id: number } | null) => void,
-    onUpdateBox: (type: 1 | 2, id: number, field: string, value: number) => void
+    onUpdateBox: (type: 1 | 2, id: number, fieldOrUpdates: string | Record<string, number>, value?: number) => void
 }) {
+    type ClsnDragType = 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'w' | 'e';
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const [dragState, setDragState] = useState<{ type: 'move' | 'nw' | 'ne' | 'sw' | 'se'; boxId: number; clsnType: 1|2; startX: number; startY: number; initialBox: any } | null>(null);
+    const [dragState, setDragState] = useState<{ type: ClsnDragType; boxId: number; clsnType: 1|2; startX: number; startY: number; initialBox: any } | null>(null);
+    const [hoverHandle, setHoverHandle] = useState<ClsnDragType | null>(null);
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -5094,26 +5492,72 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
                         ctx.fillStyle = type === 1 ? 'rgba(255, 0, 0, 0.2)' : 'rgba(0, 100, 255, 0.2)';
                         if (isSelected) {
                             ctx.lineWidth = 2;
-                            ctx.strokeStyle = type === 1 ? '#ff5555' : '#55aaff';
+                            ctx.strokeStyle = type === 1 ? '#ff4d4d' : '#4da6ff';
                         } else {
                             ctx.lineWidth = 1;
                         }
 
-                        const bX = box.x1 * zoom;
-                        const bY = box.y1 * zoom;
-                        const bW = (box.x2 - box.x1) * zoom;
-                        const bH = (box.y2 - box.y1) * zoom;
+                        const minX = Math.min(box.x1, box.x2);
+                        const maxX = Math.max(box.x1, box.x2);
+                        const minY = Math.min(box.y1, box.y2);
+                        const maxY = Math.max(box.y1, box.y2);
+
+                        const bX = minX * zoom;
+                        const bY = minY * zoom;
+                        const bW = Math.max(1, (maxX - minX) * zoom);
+                        const bH = Math.max(1, (maxY - minY) * zoom);
                         
                         ctx.fillRect(bX, bY, bW, bH);
                         ctx.strokeRect(bX, bY, bW, bH);
 
                         if (isSelected && activeTool === 'clsn_edit') {
                             const hS = 4;
-                            ctx.fillStyle = '#fff';
-                            ctx.fillRect(bX - hS, bY - hS, hS*2, hS*2);
-                            ctx.fillRect(bX + bW - hS, bY - hS, hS*2, hS*2);
-                            ctx.fillRect(bX - hS, bY + bH - hS, hS*2, hS*2);
-                            ctx.fillRect(bX + bW - hS, bY + bH - hS, hS*2, hS*2);
+                            const midBX = bX + bW / 2;
+                            const midBY = bY + bH / 2;
+
+                            const renderHandle = (x: number, y: number, isCorner = true) => {
+                                ctx.save();
+                                ctx.fillStyle = isCorner ? '#ffffff' : '#fbbf24';
+                                ctx.strokeStyle = '#000000';
+                                ctx.lineWidth = 1;
+                                ctx.fillRect(x - hS, y - hS, hS * 2, hS * 2);
+                                ctx.strokeRect(x - hS, y - hS, hS * 2, hS * 2);
+                                ctx.restore();
+                            };
+
+                            // 4 corner handles (resizes width and height together)
+                            renderHandle(bX, bY, true);              // NW
+                            renderHandle(bX + bW, bY, true);         // NE
+                            renderHandle(bX, bY + bH, true);         // SW
+                            renderHandle(bX + bW, bY + bH, true);    // SE
+
+                            // 4 edge handles (W/E for width, N/S for height)
+                            renderHandle(midBX, bY, false);          // N (Height)
+                            renderHandle(midBX, bY + bH, false);     // S (Height)
+                            renderHandle(bX, midBY, false);          // W (Width)
+                            renderHandle(bX + bW, midBY, false);     // E (Width)
+
+                            // Clean dimension badge displayed right above the box
+                            ctx.save();
+                            const widthPx = Math.abs(box.x2 - box.x1);
+                            const heightPx = Math.abs(box.y2 - box.y1);
+                            const labelText = `W: ${widthPx}px × H: ${heightPx}px`;
+                            ctx.font = 'bold 9px monospace';
+                            const textMetrics = ctx.measureText(labelText);
+                            const tagW = textMetrics.width + 10;
+                            const tagH = 15;
+                            const tagX = bX;
+                            const tagY = bY - tagH - 4;
+
+                            ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+                            ctx.fillRect(tagX, tagY, tagW, tagH);
+                            ctx.strokeStyle = type === 1 ? '#ff4d4d' : '#4da6ff';
+                            ctx.lineWidth = 1;
+                            ctx.strokeRect(tagX, tagY, tagW, tagH);
+
+                            ctx.fillStyle = '#ffffff';
+                            ctx.fillText(labelText, tagX + 5, tagY + 11);
+                            ctx.restore();
                         }
                     };
 
@@ -5154,40 +5598,63 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
         return { wx: wx / zoom, wy: wy / zoom };
     };
 
-    const startDrag = (clientX: number, clientY: number) => {
-        if (activeTool !== 'clsn_edit' || !action) return;
-        const coords = getWorkspaceCoords(clientX, clientY);
-        if (!coords) return;
-        const { wx, wy } = coords;
-
+    const checkHit = (wx: number, wy: number) => {
+        if (!action) return null;
         const handleSize = 12 / zoom;
         const selectionPadding = 8 / zoom;
-        
+
         const checkBoxes = (boxes: any[], type: 1 | 2) => {
             for (let i = boxes.length - 1; i >= 0; i--) {
                 const box = boxes[i];
                 const isSelected = selectedClsn?.type === type && selectedClsn?.id === box.id;
                 
+                const minX = Math.min(box.x1, box.x2);
+                const maxX = Math.max(box.x1, box.x2);
+                const minY = Math.min(box.y1, box.y2);
+                const maxY = Math.max(box.y1, box.y2);
+                const midX = (minX + maxX) / 2;
+                const midY = (minY + maxY) / 2;
+
                 if (isSelected) {
-                    if (Math.abs(wx - box.x1) < handleSize && Math.abs(wy - box.y1) < handleSize) return { type: 'nw' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
-                    if (Math.abs(wx - box.x2) < handleSize && Math.abs(wy - box.y1) < handleSize) return { type: 'ne' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
-                    if (Math.abs(wx - box.x1) < handleSize && Math.abs(wy - box.y2) < handleSize) return { type: 'sw' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
-                    if (Math.abs(wx - box.x2) < handleSize && Math.abs(wy - box.y2) < handleSize) return { type: 'se' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
+                    // Corner handles: Resize Width AND Height simultaneously
+                    if (Math.abs(wx - minX) < handleSize && Math.abs(wy - minY) < handleSize) 
+                        return { type: 'nw' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
+                    if (Math.abs(wx - maxX) < handleSize && Math.abs(wy - minY) < handleSize) 
+                        return { type: 'ne' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
+                    if (Math.abs(wx - minX) < handleSize && Math.abs(wy - maxY) < handleSize) 
+                        return { type: 'sw' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
+                    if (Math.abs(wx - maxX) < handleSize && Math.abs(wy - maxY) < handleSize) 
+                        return { type: 'se' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
+
+                    // Mid-edge handles: Height (N/S) or Width (W/E)
+                    if (Math.abs(wx - midX) < handleSize && Math.abs(wy - minY) < handleSize) 
+                        return { type: 'n' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
+                    if (Math.abs(wx - midX) < handleSize && Math.abs(wy - maxY) < handleSize) 
+                        return { type: 's' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
+                    if (Math.abs(wx - minX) < handleSize && Math.abs(wy - midY) < handleSize) 
+                        return { type: 'w' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
+                    if (Math.abs(wx - maxX) < handleSize && Math.abs(wy - midY) < handleSize) 
+                        return { type: 'e' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
                 }
                 
-                const minX = Math.min(box.x1, box.x2) - selectionPadding;
-                const maxX = Math.max(box.x1, box.x2) + selectionPadding;
-                const minY = Math.min(box.y1, box.y2) - selectionPadding;
-                const maxY = Math.max(box.y1, box.y2) + selectionPadding;
-
-                if (wx >= minX && wx <= maxX && wy >= minY && wy <= maxY) {
+                if (wx >= minX - selectionPadding && wx <= maxX + selectionPadding && 
+                    wy >= minY - selectionPadding && wy <= maxY + selectionPadding) {
                     return { type: 'move' as const, boxId: box.id, clsnType: type, initialBox: { ...box } };
                 }
             }
             return null;
         };
 
-        const result = checkBoxes(action.clsn1, 1) || checkBoxes(action.clsn2, 2);
+        return checkBoxes(action.clsn1, 1) || checkBoxes(action.clsn2, 2);
+    };
+
+    const startDrag = (clientX: number, clientY: number) => {
+        if (activeTool !== 'clsn_edit' || !action) return;
+        const coords = getWorkspaceCoords(clientX, clientY);
+        if (!coords) return;
+        const { wx, wy } = coords;
+
+        const result = checkHit(wx, wy);
         
         if (result) {
             setSelectedClsn({ type: result.clsnType, id: result.boxId });
@@ -5208,22 +5675,79 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
         const b = dragState.initialBox;
 
         if (dragState.type === 'move') {
-            onUpdateBox(dragState.clsnType, dragState.boxId, 'x1', b.x1 + dx);
-            onUpdateBox(dragState.clsnType, dragState.boxId, 'y1', b.y1 + dy);
-            onUpdateBox(dragState.clsnType, dragState.boxId, 'x2', b.x2 + dx);
-            onUpdateBox(dragState.clsnType, dragState.boxId, 'y2', b.y2 + dy);
+            onUpdateBox(dragState.clsnType, dragState.boxId, {
+                x1: b.x1 + dx,
+                y1: b.y1 + dy,
+                x2: b.x2 + dx,
+                y2: b.y2 + dy
+            });
         } else if (dragState.type === 'nw') {
-            onUpdateBox(dragState.clsnType, dragState.boxId, 'x1', b.x1 + dx);
-            onUpdateBox(dragState.clsnType, dragState.boxId, 'y1', b.y1 + dy);
+            // Resizes width (x1) and height (y1)
+            onUpdateBox(dragState.clsnType, dragState.boxId, {
+                x1: b.x1 + dx,
+                y1: b.y1 + dy
+            });
         } else if (dragState.type === 'ne') {
-            onUpdateBox(dragState.clsnType, dragState.boxId, 'x2', b.x2 + dx);
-            onUpdateBox(dragState.clsnType, dragState.boxId, 'y1', b.y1 + dy);
+            // Resizes width (x2) and height (y1)
+            onUpdateBox(dragState.clsnType, dragState.boxId, {
+                x2: b.x2 + dx,
+                y1: b.y1 + dy
+            });
         } else if (dragState.type === 'sw') {
-            onUpdateBox(dragState.clsnType, dragState.boxId, 'x1', b.x1 + dx);
-            onUpdateBox(dragState.clsnType, dragState.boxId, 'y2', b.y2 + dy);
+            // Resizes width (x1) and height (y2)
+            onUpdateBox(dragState.clsnType, dragState.boxId, {
+                x1: b.x1 + dx,
+                y2: b.y2 + dy
+            });
         } else if (dragState.type === 'se') {
-            onUpdateBox(dragState.clsnType, dragState.boxId, 'x2', b.x2 + dx);
-            onUpdateBox(dragState.clsnType, dragState.boxId, 'y2', b.y2 + dy);
+            // Resizes width (x2) and height (y2)
+            onUpdateBox(dragState.clsnType, dragState.boxId, {
+                x2: b.x2 + dx,
+                y2: b.y2 + dy
+            });
+        } else if (dragState.type === 'n') {
+            // Resizes height (y1)
+            onUpdateBox(dragState.clsnType, dragState.boxId, {
+                y1: b.y1 + dy
+            });
+        } else if (dragState.type === 's') {
+            // Resizes height (y2)
+            onUpdateBox(dragState.clsnType, dragState.boxId, {
+                y2: b.y2 + dy
+            });
+        } else if (dragState.type === 'w') {
+            // Resizes width (x1)
+            onUpdateBox(dragState.clsnType, dragState.boxId, {
+                x1: b.x1 + dx
+            });
+        } else if (dragState.type === 'e') {
+            // Resizes width (x2)
+            onUpdateBox(dragState.clsnType, dragState.boxId, {
+                x2: b.x2 + dx
+            });
+        }
+    };
+
+    const getCursorStyle = () => {
+        if (activeTool !== 'clsn_edit') return 'default';
+        const active = dragState ? dragState.type : hoverHandle;
+        switch (active) {
+            case 'nw':
+            case 'se':
+                return 'nwse-resize';
+            case 'ne':
+            case 'sw':
+                return 'nesw-resize';
+            case 'n':
+            case 's':
+                return 'ns-resize';
+            case 'w':
+            case 'e':
+                return 'ew-resize';
+            case 'move':
+                return 'move';
+            default:
+                return 'crosshair';
         }
     };
 
@@ -5233,12 +5757,22 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
             startDrag(e.clientX, e.clientY);
         }
     };
+
     const handleMouseMove = (e: React.MouseEvent) => {
         if (dragState) {
             e.stopPropagation();
             doDrag(e.clientX, e.clientY);
+        } else if (activeTool === 'clsn_edit') {
+            const coords = getWorkspaceCoords(e.clientX, e.clientY);
+            if (coords) {
+                const hit = checkHit(coords.wx, coords.wy);
+                setHoverHandle(hit ? hit.type : null);
+            } else {
+                setHoverHandle(null);
+            }
         }
     };
+
     const handleTouchStart = (e: React.TouchEvent) => {
         if (activeTool === 'clsn_edit') {
             e.stopPropagation();
@@ -5246,6 +5780,7 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
             startDrag(e.touches[0].clientX, e.touches[0].clientY);
         }
     };
+
     const handleTouchMove = (e: React.TouchEvent) => {
         if (dragState) {
             e.stopPropagation();
@@ -5256,10 +5791,11 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
 
     return (
         <div className="w-full h-full relative overflow-hidden touch-none" 
+             style={{ cursor: getCursorStyle() }}
              onMouseDown={handleMouseDown}
              onMouseMove={handleMouseMove}
              onMouseUp={() => setDragState(null)}
-             onMouseLeave={() => setDragState(null)}
+             onMouseLeave={() => { setDragState(null); setHoverHandle(null); }}
              onTouchStart={handleTouchStart}
              onTouchMove={handleTouchMove}
              onTouchEnd={() => setDragState(null)}>

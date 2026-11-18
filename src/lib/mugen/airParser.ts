@@ -9,31 +9,65 @@ export function parseAirString(data: string): AirData {
   let currentAction: AirAction | null = null;
   let defaultClsn1: ClsnBox[] = [];
   let defaultClsn2: ClsnBox[] = [];
+  let pendingName = "";
 
-  const lines = data.split(/\r?\n/);
+  const lines = data.replace(/^\uFEFF/, "").split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
-    // Trim and strip comments
-    let line = lines[i].split(";")[0].trim();
+    const rawTrimmed = lines[i].trim();
+    if (!rawTrimmed) {
+      pendingName = "";
+      continue;
+    }
+
+    // Track preceding comment lines as potential Action names (FF3 / M.U.G.E.N style)
+    if (rawTrimmed.startsWith(";")) {
+      const commentBody = rawTrimmed.replace(/^;+/, "").trim();
+      // Ignore pure divider lines (e.g. ;------- or ;=======) without clearing an existing pending name above a divider
+      if (!commentBody || /^[-=*_~#|;:\s]+$/.test(commentBody)) {
+        continue;
+      }
+      const cleanedName = commentBody
+        .replace(/^[-=*_~#|]{2,}\s*/, "")
+        .replace(/\s*[-=*_~#|]{2,}$/, "")
+        .trim();
+      if (cleanedName) {
+        pendingName = cleanedName;
+      }
+      continue;
+    }
+
+    // Extract code part and optional inline comment
+    const semiIdx = lines[i].indexOf(";");
+    const line = (semiIdx !== -1 ? lines[i].slice(0, semiIdx) : lines[i]).trim();
+    const inlineComment = semiIdx !== -1 ? lines[i].slice(semiIdx + 1).trim() : "";
     if (!line) continue;
 
-    // Matches [Begin Action 0]
-    const actionMatch = line.match(/^\[Begin Action (\d+)\]$/i);
+    // Matches [Begin Action 0] with flexible spacing
+    const actionMatch = line.match(/^\[\s*Begin\s+Action\s+([+-]?\d+)\s*\]$/i);
     if (actionMatch) {
       const id = parseInt(actionMatch[1], 10);
+      const cleanedInline = inlineComment
+        .replace(/^[-=*_~#|]{2,}\s*/, "")
+        .replace(/\s*[-=*_~#|]{2,}$/, "")
+        .trim();
+      const resolvedName = cleanedInline || pendingName || undefined;
       currentAction = {
         id,
+        ...(resolvedName ? { name: resolvedName } : {}),
         elements: [],
         clsn1: [],
         clsn2: []
       };
       actions[id] = currentAction;
       
-      // Reset Default Collision blocks applied below Action tags
+      // Reset Default Collision blocks and pending comment name
       defaultClsn1 = [];
       defaultClsn2 = [];
+      pendingName = "";
       continue;
     }
 
+    pendingName = "";
     if (!currentAction) continue;
 
     const lowerLine = line.toLowerCase();
@@ -102,6 +136,9 @@ export function serializeAirData(air: AirData): string {
 
   for (const id of sortedActionIds) {
     const action = air.actions[id];
+    if (action.name && action.name.trim()) {
+      output += `; ${action.name.trim()}\n`;
+    }
     output += `[Begin Action ${action.id}]\n`;
     
     // Attack boxes (Clsn1)

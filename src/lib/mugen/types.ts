@@ -36,6 +36,7 @@ export interface AirData {
 
 export interface AirAction {
   id: number;
+  name?: string;
   elements: AirElement[];
   clsn1: ClsnBox[]; // Attack boxes - Red
   clsn2: ClsnBox[]; // Defense boxes - Blue

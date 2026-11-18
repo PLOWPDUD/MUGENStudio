@@ -7,7 +7,7 @@ import {
   Volume2, Music, Download, PlusCircle, Square, Eraser, Palette, Zap, Box, Upload
 } from 'lucide-react';
 import JSZip from 'jszip';
-import { parseIniString, stringifyIni } from '../lib/mugen/defParser';
+import { parseIniString, stringifyIni, getIniField, getSectionKeyValue, stripIniSuffix, updateIniTextField } from '../lib/mugen/defParser';
 import { parseSffBinary, extractPortraits } from '../lib/mugen/sffParser';
 import { generateTemplateSff, buildSffBinary } from '../lib/mugen/sffGenerator';
 import { templateAir, templateCmd, templateCns, templateDef } from '../lib/mugen/templateFiles';
@@ -19,63 +19,6 @@ import type { SndSound, SndData } from '../lib/mugen/sndParser';
 import { LanguagePicker } from './LanguagePicker';
 import { saveProject, SavedProject } from '../lib/projectStorage';
 
-function generateBeepWav(freq: number, durationMs: number, type: 'sine' | 'square' | 'noise' = 'sine'): Uint8Array {
-  const sampleRate = 11025;
-  const numSamples = Math.floor((sampleRate * durationMs) / 1000);
-  const headerSize = 44;
-  const totalSize = headerSize + numSamples;
-  const buffer = new Uint8Array(totalSize);
-  const view = new DataView(buffer.buffer);
-  
-  buffer[0] = 0x52; // R
-  buffer[1] = 0x49; // I
-  buffer[2] = 0x46; // F
-  buffer[3] = 0x46; // F
-  
-  view.setUint32(4, totalSize - 8, true);
-  
-  buffer[8] = 0x57; // W
-  buffer[9] = 0x41; // A
-  buffer[10] = 0x56; // V
-  buffer[11] = 0x45; // E
-  
-  buffer[12] = 0x66; // f
-  buffer[13] = 0x6d; // m
-  buffer[14] = 0x74; // t
-  buffer[15] = 0x20; // ' '
-  
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate, true);
-  view.setUint16(32, 1, true);
-  view.setUint16(34, 8, true);
-  
-  buffer[36] = 0x64; // d
-  buffer[37] = 0x61; // a
-  buffer[38] = 0x74; // t
-  buffer[39] = 0x61; // a
-  
-  view.setUint32(40, numSamples, true);
-  
-  for (let i = 0; i < numSamples; i++) {
-    const t = i / sampleRate;
-    let sampleVal = 127;
-    
-    if (type === 'sine') {
-      sampleVal = Math.round(127 + 120 * Math.sin(2 * Math.PI * freq * t));
-    } else if (type === 'square') {
-      sampleVal = Math.round(127 + 120 * (Math.sin(2 * Math.PI * freq * t) >= 0 ? 1 : -1));
-    } else if (type === 'noise') {
-      sampleVal = Math.round(127 + 120 * (Math.random() * 2 - 1));
-    }
-    
-    buffer[headerSize + i] = Math.max(0, Math.min(255, sampleVal));
-  }
-  
-  return buffer;
-}
 
 interface MugenStudioProps {
   initialAction?: 'new' | 'open_zip' | 'import_folder' | 'saved_project';
@@ -94,7 +37,7 @@ export default function MugenStudio({
   onShowDocs
 }: MugenStudioProps) {
   const { t, i18n } = useTranslation();
-  const [activeMode, setActiveMode] = useState<'Definitions' | 'Sprites' | 'Animations' | 'Commands' | 'States' | 'Sounds' | 'Backgrounds'>('Definitions');
+  const [activeMode, setActiveMode] = useState<'Definitions' | 'Sprites' | 'Animations' | 'Commands' | 'States' | 'Sounds'>('Definitions');
   
   const [projectId, setProjectId] = useState<string>(() => initialProject?.id || 'proj_' + Date.now());
   const [lastAutoSavedAt, setLastAutoSavedAt] = useState<Date | null>(null);
@@ -192,10 +135,16 @@ export default function MugenStudio({
     // 2. Animations (AIR)
     if (airData && airData.actions) {
       Object.entries(airData.actions).forEach(([actionId, act]: [string, any]) => {
-        if (actionId.toLowerCase().includes(q) || `anim ${actionId}`.includes(q)) {
+        const actName = typeof act.name === 'string' ? act.name.trim() : '';
+        if (
+          actionId.toLowerCase().includes(q) ||
+          `anim ${actionId}`.includes(q) ||
+          `action ${actionId}`.includes(q) ||
+          (actName && actName.toLowerCase().includes(q))
+        ) {
           results.push({
             type: 'Animation',
-            title: `Animation Action ${actionId}`,
+            title: `Action ${actionId}${actName ? ` - ${actName}` : ''}`,
             subtitle: `${act.elements?.length || 0} frames`,
             action: () => {
               setActiveMode('Animations');
@@ -224,10 +173,11 @@ export default function MugenStudio({
       }
       if (file.parsed) {
         Object.entries(file.parsed).forEach(([sec, keys]) => {
-          if (sec.toLowerCase().includes(q)) {
+          const cleanSec = stripIniSuffix(sec);
+          if (cleanSec.toLowerCase().includes(q)) {
             results.push({
               type: 'State / Section',
-              title: `[${sec}] in ${file.filename}`,
+              title: `[${cleanSec}] in ${file.filename}`,
               subtitle: `State Definition`,
               action: () => {
                 setActiveMode('States');
@@ -237,10 +187,11 @@ export default function MugenStudio({
             });
           }
           Object.entries(keys as Record<string, string>).forEach(([k, v]) => {
-            if (k.toLowerCase().includes(q) || String(v).toLowerCase().includes(q)) {
+            const cleanKey = stripIniSuffix(k);
+            if (cleanKey.toLowerCase().includes(q) || String(v).toLowerCase().includes(q)) {
               results.push({
                 type: 'CNS Key',
-                title: `${k} = ${v} ([${sec}])`,
+                title: `${cleanKey} = ${v} ([${cleanSec}])`,
                 subtitle: `Found in ${file.filename}`,
                 action: () => {
                   setActiveMode('States');
@@ -270,12 +221,15 @@ export default function MugenStudio({
       }
       if (file.parsed) {
         Object.entries(file.parsed).forEach(([sec, keys]) => {
+          const cleanSec = stripIniSuffix(sec);
+          const cmdLabel = cleanSec.toLowerCase() === 'command' ? getSectionKeyValue(keys as Record<string, string>, 'name') : '';
           Object.entries(keys as Record<string, string>).forEach(([k, v]) => {
-            if (k.toLowerCase().includes(q) || String(v).toLowerCase().includes(q) || sec.toLowerCase().includes(q)) {
+            const cleanKey = stripIniSuffix(k);
+            if (cleanKey.toLowerCase().includes(q) || String(v).toLowerCase().includes(q) || cleanSec.toLowerCase().includes(q)) {
               results.push({
                 type: 'Command Item',
-                title: `${k} = ${v}`,
-                subtitle: `Section [${sec}] in ${file.filename}`,
+                title: cmdLabel ? `[Command] ${cmdLabel}: ${cleanKey} = ${v}` : `${cleanKey} = ${v}`,
+                subtitle: `Section [${cleanSec}] in ${file.filename}`,
                 action: () => {
                   setActiveMode('Commands');
                   setActiveCmdFileId(file.id);
@@ -291,12 +245,14 @@ export default function MugenStudio({
     // 5. Definitions (iniData)
     if (iniData) {
       Object.entries(iniData).forEach(([sec, keys]) => {
+        const cleanSec = stripIniSuffix(sec);
         Object.entries(keys).forEach(([k, v]) => {
-          if (sec.toLowerCase().includes(q) || k.toLowerCase().includes(q) || String(v).toLowerCase().includes(q)) {
+          const cleanKey = stripIniSuffix(k);
+          if (cleanSec.toLowerCase().includes(q) || cleanKey.toLowerCase().includes(q) || String(v).toLowerCase().includes(q)) {
             results.push({
               type: 'Definition',
-              title: `${k} = ${v}`,
-              subtitle: `Section [${sec}] (DEF)`,
+              title: `${cleanKey} = ${v}`,
+              subtitle: `Section [${cleanSec}] (DEF)`,
               action: () => {
                 setActiveMode('Definitions');
                 setIsSearchModalOpen(false);
@@ -588,6 +544,7 @@ export default function MugenStudio({
       sffDataRef.current = prev.sff;
       setAirData(prev.air);
       airDataRef.current = prev.air;
+      if (prev.air) syncAirRawText(prev.air);
       if (prev.layersMap) {
         setSpriteLayersMap(prev.layersMap);
         spriteLayersMapRef.current = prev.layersMap;
@@ -603,6 +560,7 @@ export default function MugenStudio({
       sffDataRef.current = next.sff;
       setAirData(next.air);
       airDataRef.current = next.air;
+      if (next.air) syncAirRawText(next.air);
       if (next.layersMap) {
         setSpriteLayersMap(next.layersMap);
         spriteLayersMapRef.current = next.layersMap;
@@ -637,6 +595,8 @@ export default function MugenStudio({
   const [spriteSidebarTab, setSpriteSidebarTab] = useState<'gallery' | 'palettes' | 'layers'>('gallery');
   const [showPaletteOverlay, setShowPaletteOverlay] = useState(true);
   const [newActionIdText, setNewActionIdText] = useState('100');
+  const [newActionNameText, setNewActionNameText] = useState('');
+  const [pickerSearch, setPickerSearch] = useState('');
 
   // Pivot drags & Canvas interactions
   const [isDragging, setIsDragging] = useState(false);
@@ -683,6 +643,7 @@ export default function MugenStudio({
   const spritePngInputRef = useRef<HTMLInputElement>(null);
   const replaceSpriteInputRef = useRef<HTMLInputElement>(null);
   const addSoundInputRef = useRef<HTMLInputElement>(null);
+  const codeEditorTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (initialProject) {
@@ -699,19 +660,23 @@ export default function MugenStudio({
           setActiveCmdFileId(deserialized.cmdFiles[0].id);
         }
         if (deserialized.airRawText) setAirRawText(deserialized.airRawText);
+        let loadedAir: AirData | null = null;
         try {
           if (deserialized.airRawText) {
-            setAirData(parseAirString(deserialized.airRawText));
+            loadedAir = parseAirString(deserialized.airRawText);
+            airDataRef.current = loadedAir;
+            setAirData(loadedAir);
           }
         } catch(e) {}
         if (deserialized.sffData) {
+          sffDataRef.current = deserialized.sffData;
           setSffData(deserialized.sffData);
           setSelectedSpriteIdx(0);
         }
         if (deserialized.sndData) setSndData(deserialized.sndData);
         if (deserialized.actPalette) setActPalette(deserialized.actPalette);
         setProjectId(deserialized.id);
-        setHistory([{ sff: deserialized.sffData, air: airData }]);
+        setHistory([{ sff: deserialized.sffData, air: loadedAir }]);
         setHistoryIndex(0);
         return;
       } catch (e) {
@@ -751,22 +716,9 @@ export default function MugenStudio({
       setAirData(initialAir);
     } catch(e) {}
 
-    // Populate with template sounds
-    try {
-      const s1 = generateBeepWav(440, 250, 'sine'); // Jump beep
-      const s2 = generateBeepWav(180, 200, 'square'); // Punch
-      const s3 = generateBeepWav(100, 400, 'noise'); // Hit noise
-      
-      const defaultSounds: SndSound[] = [
-        { id: 'snd-0-1', group: 0, sample: 1, data: s1, format: 'wav', name: 'snd_jump' },
-        { id: 'snd-20-1', group: 20, sample: 1, data: s2, format: 'wav', name: 'snd_punch' },
-        { id: 'snd-20-2', group: 20, sample: 2, data: s3, format: 'wav', name: 'snd_hit' }
-      ];
-      setSndData({ version: '1.0', sounds: defaultSounds });
-      setSelectedSoundId('snd-0-1');
-    } catch (e) {
-      console.error("Failed to generate default template sounds:", e);
-    }
+    // Start with empty sound bank (no template sounds)
+    setSndData(null);
+    setSelectedSoundId(null);
 
     // Also populate with template sprite sheet so studio is fully configured with character assets
     const tBlob = generateTemplateSff();
@@ -944,7 +896,7 @@ export default function MugenStudio({
 
   const saveProjectToLocalStorage = async (isAuto: boolean = false) => {
     try {
-      const projectName = iniData?.Info?.name || 'Untitled Character';
+      const projectName = getIniField(iniData, 'Info', 'name') || 'Untitled Character';
       const projectState: SavedProject = {
         id: projectId,
         name: projectName,
@@ -1695,19 +1647,72 @@ export default function MugenStudio({
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
-    
-    const filesArray = Array.from(files) as File[];
-    const hasActInSelection = filesArray.some(f => f.name.toLowerCase().endsWith('.act'));
 
-    for (let i = 0; i < files.length; i++) {
-        const file = files[i];
+    interface ImportEntry {
+      name: string;
+      relativePath: string;
+      text: () => Promise<string>;
+      arrayBuffer: () => Promise<ArrayBuffer>;
+    }
+
+    const collectedEntries: ImportEntry[] = [];
+    const rawFiles = Array.from(files) as File[];
+
+    for (const file of rawFiles) {
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      if (ext === 'zip') {
+        try {
+          const zip = await JSZip.loadAsync(await file.arrayBuffer());
+          const entries = Object.values(zip.files);
+          for (const entry of entries) {
+            if (entry.dir) continue;
+            if (entry.name.startsWith('__MACOSX/') || entry.name.endsWith('.DS_Store')) continue;
+            const baseName = entry.name.split('/').pop() || entry.name;
+            collectedEntries.push({
+              name: baseName,
+              relativePath: entry.name,
+              text: () => entry.async('string'),
+              arrayBuffer: () => entry.async('arraybuffer')
+            });
+          }
+        } catch (err: any) {
+          console.error(`Error extracting ${file.name}: `, err);
+          alert(`Failed to extract ZIP archive ${file.name}: ${err.message}`);
+        }
+      } else {
+        collectedEntries.push({
+          name: file.name,
+          relativePath: (file as any).webkitRelativePath || file.name,
+          text: () => file.text(),
+          arrayBuffer: () => file.arrayBuffer()
+        });
+      }
+    }
+
+    if (collectedEntries.length === 0) return;
+
+    // Parse .def first so we know target anim/sprite/sound/pal filenames if multiple files exist
+    let targetAnimFile = '';
+    const defEntries = collectedEntries.filter(f => f.name.split('.').pop()?.toLowerCase() === 'def');
+    const otherEntries = collectedEntries.filter(f => f.name.split('.').pop()?.toLowerCase() !== 'def');
+    const orderedEntries = [...defEntries, ...otherEntries];
+
+    const hasActInSelection = collectedEntries.some(f => f.name.toLowerCase().endsWith('.act'));
+    let airLoadedFromDefTarget = false;
+
+    for (const file of orderedEntries) {
         const ext = file.name.split('.').pop()?.toLowerCase();
         
         try {
             if (ext === 'def') {
                 const text = await file.text();
-                setIniData(parseIniString(text));
+                const parsedDef = parseIniString(text);
+                setIniData(parsedDef);
                 setIniRawText(text);
+                const defAnim = getIniField(parsedDef, 'Files', 'anim');
+                if (defAnim) {
+                  targetAnimFile = defAnim.split(/[/\\]/).pop()?.trim().toLowerCase() || '';
+                }
             } else if (ext === 'cns' || ext === 'st') {
                 const text = await file.text();
                 const fileId = `file-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
@@ -1733,7 +1738,9 @@ export default function MugenStudio({
             } else if (ext === 'sff') {
                 const buffer = await file.arrayBuffer();
                 const parsed = parseSffBinary(buffer);
+                sffDataRef.current = parsed;
                 setSffData(parsed);
+                setSelectedSpriteIdx(0);
                 
                 // Select the first available palette
                 if (parsed.palettes && parsed.palettes.length > 0) {
@@ -1766,9 +1773,22 @@ export default function MugenStudio({
                     return { ...prev, palettes: nextPalettes };
                 });
             } else if (ext === 'air') {
+                const matchesDefAnim = targetAnimFile && file.name.toLowerCase() === targetAnimFile;
+                if (airLoadedFromDefTarget && !matchesDefAnim) {
+                  continue;
+                }
                 const text = await file.text();
-                setAirData(parseAirString(text));
+                const parsedAir = parseAirString(text);
+                airDataRef.current = parsedAir;
+                setAirData(parsedAir);
                 setAirRawText(text);
+                setCurrentFrame(0);
+                setIsPlaying(false);
+                const firstActionId = Object.keys(parsedAir.actions).map(Number).sort((a, b) => a - b)[0];
+                setSelectedActionId(firstActionId !== undefined ? firstActionId : null);
+                if (matchesDefAnim) {
+                  airLoadedFromDefTarget = true;
+                }
             } else if (ext === 'snd') {
                 const buffer = await file.arrayBuffer();
                 const parsedSnd = parseSndBinary(buffer);
@@ -1776,7 +1796,6 @@ export default function MugenStudio({
                 if (parsedSnd.sounds.length > 0) {
                     setSelectedSoundId(parsedSnd.sounds[0].id);
                 }
-                setActiveMode('Sounds');
             } else if (['wav', 'mp3', 'ogg', 'm4a', 'aac'].includes(ext || '')) {
                 const buffer = await file.arrayBuffer();
                 const uint8data = new Uint8Array(buffer);
@@ -1808,10 +1827,10 @@ export default function MugenStudio({
     pushToHistory();
   };
 
-  const menuItems = ["Project", "Edit", "View", "Backgrounds", "Sprites", "Animations", "Commands", "States", "Sounds"];
+  const menuItems = ["Project", "Edit", "View", "Sprites", "Animations", "Commands", "States", "Sounds"];
 
   const handleMenuClick = (item: string) => {
-    if (['Sprites', 'Animations', 'Commands', 'States', 'Sounds', 'Backgrounds'].includes(item)) {
+    if (['Sprites', 'Animations', 'Commands', 'States', 'Sounds'].includes(item)) {
         setActiveMode(item as any);
         setActiveDropdown(null);
     } else if (item === 'Project') {
@@ -1883,13 +1902,16 @@ export default function MugenStudio({
   };
 
   const handleUpdateDefValue = (section: string, key: string, value: string) => {
-    if (!iniData) return;
-    const nextData = { ...iniData };
-    if (!nextData[section]) nextData[section] = {};
-    nextData[section][key] = value;
-    setIniData(nextData);
-    const text = stringifyIni(nextData);
-    setIniRawText(text);
+    const baseText = iniRawText ?? templateDef;
+    const nextText = updateIniTextField(
+      baseText,
+      section,
+      key,
+      value,
+      section.toLowerCase() === 'info'
+    );
+    setIniRawText(nextText);
+    setIniData(parseIniString(nextText));
   };
 
   const handleDeleteSprite = () => {
@@ -1904,14 +1926,16 @@ export default function MugenStudio({
     setSelectedSpriteIdx(nextImages.length > 0 ? 0 : 0);
   };
 
-  const handleAddAnimAction = (actionId: number) => {
+  const handleAddAnimAction = (actionId: number, actionName?: string) => {
     if (!airData) return;
     if (airData.actions[actionId]) {
       alert(`Action ${actionId} already exists!`);
       return;
     }
+    const trimmedName = actionName?.trim();
     const newAction: any = {
       id: actionId,
+      ...(trimmedName ? { name: trimmedName } : {}),
       elements: [
         { group: 0, image: 0, xOffset: 0, yOffset: 0, time: 5, flip: "" }
       ],
@@ -1919,9 +1943,30 @@ export default function MugenStudio({
       clsn2: []
     };
     const nextAir = { ...airData, actions: { ...airData.actions, [actionId]: newAction } };
+    airDataRef.current = nextAir;
     setAirData(nextAir);
     setSelectedActionId(actionId);
     setCurrentFrame(0);
+    setNewActionNameText('');
+    syncAirRawText(nextAir);
+  };
+
+  const handleRenameAnimAction = (actionId: number, name: string) => {
+    if (!airData) return;
+    const action = airData.actions[actionId];
+    if (!action) return;
+    const nextAir = {
+      ...airData,
+      actions: {
+        ...airData.actions,
+        [actionId]: {
+          ...action,
+          name
+        }
+      }
+    };
+    airDataRef.current = nextAir;
+    setAirData(nextAir);
     syncAirRawText(nextAir);
   };
 
@@ -2096,14 +2141,20 @@ export default function MugenStudio({
     if (!airData || selectedActionId === null) return;
     const action = airData.actions[selectedActionId];
     if (!action) return;
-    const element = action.elements[currentFrame];
-    if (!element) return;
 
     const nextAir = { ...airData };
     const nextAction = { ...action };
     nextAction.elements = [...nextAction.elements];
-    nextAction.elements[currentFrame] = { ...element, group, image };
+
+    if (nextAction.elements[currentFrame]) {
+      nextAction.elements[currentFrame] = { ...nextAction.elements[currentFrame], group, image };
+    } else {
+      nextAction.elements.push({ group, image, xOffset: 0, yOffset: 0, time: 5, flip: "" });
+      setCurrentFrame(nextAction.elements.length - 1);
+    }
+
     nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
+    airDataRef.current = nextAir;
     setAirData(nextAir);
     syncAirRawText(nextAir);
   };
@@ -2203,7 +2254,7 @@ export default function MugenStudio({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${iniData?.Info?.name || 'character'}.act`;
+    a.download = `${getIniField(iniData, 'Info', 'name') || 'character'}.act`;
     a.click();
   };
 
@@ -2330,7 +2381,7 @@ export default function MugenStudio({
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `${iniData?.Info?.name || 'character'}.snd`;
+        a.download = `${getIniField(iniData, 'Info', 'name') || 'character'}.snd`;
         a.click();
       } catch (err: any) {
         alert("Failed to compile sound (SND) archive: " + err.message);
@@ -2359,16 +2410,16 @@ export default function MugenStudio({
     try {
       const zip = new JSZip();
       
-      const charName = iniData?.Info?.name || 'character';
+      const charName = getIniField(iniData, 'Info', 'name') || 'character';
       const charNameClean = charName.toLowerCase().replace(/[^a-z0-9_-]/g, '') || 'character';
       
       // Filename mappings
-      const cmdFile = iniData?.Files?.cmd || "player.cmd";
-      const cnsFile = iniData?.Files?.cns || "player.cns";
-      const sffFile = iniData?.Files?.sprite || "player.sff";
-      const airFile = iniData?.Files?.anim || "player.air";
-      const sndFile = iniData?.Files?.sound || "player.snd";
-      const actFile = iniData?.Files?.pal1 || "player.act";
+      const cmdFile = getIniField(iniData, 'Files', 'cmd') || "player.cmd";
+      const cnsFile = getIniField(iniData, 'Files', 'cns') || "player.cns";
+      const sffFile = getIniField(iniData, 'Files', 'sprite') || "player.sff";
+      const airFile = getIniField(iniData, 'Files', 'anim') || "player.air";
+      const sndFile = getIniField(iniData, 'Files', 'sound') || "player.snd";
+      const actFile = getIniField(iniData, 'Files', 'pal1') || "player.act";
       const defFile = `${charNameClean}.def`;
 
       // 1. Definition File (.def)
@@ -2578,7 +2629,7 @@ export default function MugenStudio({
 
   return (
     <div className="flex h-screen w-full flex-col font-sans text-white text-xs select-none" style={{ backgroundColor: '#2a2a2a' }}>
-      <input type="file" ref={fileInputRef} multiple accept=".def,.cns,.st,.cmd,.sff,.act,.air,.snd,.wav,.mp3" onChange={handleFileUpload} className="hidden" />
+      <input type="file" ref={fileInputRef} multiple accept=".zip,.def,.cns,.st,.cmd,.sff,.act,.air,.snd,.wav,.mp3" onChange={handleFileUpload} className="hidden" />
 
       {/* Menu Bar */}
       <div className="flex items-center px-1 bg-[#1a1a1a] border-b border-[#3a3a3a] whitespace-nowrap shrink-0 max-w-[100vw] relative z-[1000]">
@@ -2726,7 +2777,7 @@ export default function MugenStudio({
                  className={`flex-1 text-center py-2 cursor-pointer ${mobileTab === 'right' ? 'text-blue-400 border-b-2 border-blue-400 bg-blue-900/20' : 'text-gray-400'}`}
                  onClick={() => setMobileTab('right')}
              >
-                 Palette
+                 {activeMode === 'Animations' ? 'Sprites' : 'Palette'}
              </div>
          )}
       </div>
@@ -2746,9 +2797,11 @@ export default function MugenStudio({
          >
             <div className="bg-[#111111] text-gray-300 font-bold py-2 px-3 flex justify-between items-center border-b border-[#333333]">
                 <span className="uppercase text-[10px] tracking-wider">{t(`studio.modes.${activeMode.toLowerCase()}`)} {t('studio.properties')}</span>
-                <span className="text-[9px] bg-blue-900/50 text-blue-400 px-1.5 py-0.5 rounded font-mono">
-                    ID: {activeMode === 'Sprites' ? (selectedSpriteIdx !== null ? selectedSpriteIdx : '0') : (selectedActionId !== null ? selectedActionId : '0')}
-                </span>
+                {(activeMode === 'Sprites' || activeMode === 'Animations') && (
+                    <span className="text-[9px] bg-blue-900/50 text-blue-400 px-1.5 py-0.5 rounded font-mono">
+                        ID: {activeMode === 'Sprites' ? (selectedSpriteIdx !== null ? selectedSpriteIdx : '0') : (selectedActionId !== null ? selectedActionId : '0')}
+                    </span>
+                )}
             </div>
             
             <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-4">
@@ -2761,7 +2814,7 @@ export default function MugenStudio({
                             <input 
                                 type="text"
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded"
-                                value={iniData?.Info?.name || ''} 
+                                value={getIniField(iniData, 'Info', 'name')}
                                 onChange={e => handleUpdateDefValue('Info', 'name', e.target.value)}
                             />
                         </div>
@@ -2771,7 +2824,7 @@ export default function MugenStudio({
                             <input 
                                 type="text" 
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded"
-                                value={iniData?.Info?.displayname || ''} 
+                                value={getIniField(iniData, 'Info', 'displayname')}
                                 onChange={e => handleUpdateDefValue('Info', 'displayname', e.target.value)}
                             />
                         </div>
@@ -2781,7 +2834,7 @@ export default function MugenStudio({
                             <input 
                                 type="text" 
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded"
-                                value={iniData?.Info?.author || ''} 
+                                value={getIniField(iniData, 'Info', 'author')}
                                 onChange={e => handleUpdateDefValue('Info', 'author', e.target.value)}
                             />
                         </div>
@@ -2791,7 +2844,7 @@ export default function MugenStudio({
                             <input 
                                 type="text" 
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded"
-                                value={iniData?.Info?.mugenversion || '1.0'} 
+                                value={getIniField(iniData, 'Info', 'mugenversion') || '1.0'}
                                 onChange={e => handleUpdateDefValue('Info', 'mugenversion', e.target.value)}
                             />
                         </div>
@@ -2803,8 +2856,18 @@ export default function MugenStudio({
                             <input 
                                 type="text" 
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded font-mono"
-                                value={iniData?.Files?.cns || ''}
+                                value={getIniField(iniData, 'Files', 'cns')}
                                 onChange={e => handleUpdateDefValue('Files', 'cns', e.target.value)}
+                            />
+                        </div>
+
+                        <div className="flex flex-col gap-1">
+                            <label className="text-[10px] text-gray-400">Commands File (.cmd)</label>
+                            <input 
+                                type="text"
+                                className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded font-mono"
+                                value={getIniField(iniData, 'Files', 'cmd')}
+                                onChange={e => handleUpdateDefValue('Files', 'cmd', e.target.value)}
                             />
                         </div>
 
@@ -2813,7 +2876,7 @@ export default function MugenStudio({
                             <input 
                                 type="text" 
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded font-mono"
-                                value={iniData?.Files?.sprite || ''} 
+                                value={getIniField(iniData, 'Files', 'sprite')}
                                 onChange={e => handleUpdateDefValue('Files', 'sprite', e.target.value)}
                             />
                         </div>
@@ -2823,8 +2886,18 @@ export default function MugenStudio({
                             <input 
                                 type="text" 
                                 className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded font-mono"
-                                value={iniData?.Files?.anim || ''} 
+                                value={getIniField(iniData, 'Files', 'anim')} 
                                 onChange={e => handleUpdateDefValue('Files', 'anim', e.target.value)}
+                            />
+                        </div>
+
+                        <div className="flex flex-col gap-1">
+                            <label className="text-[10px] text-gray-400">Sounds File (.snd)</label>
+                            <input 
+                                type="text"
+                                className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded font-mono"
+                                value={getIniField(iniData, 'Files', 'sound')}
+                                onChange={e => handleUpdateDefValue('Files', 'sound', e.target.value)}
                             />
                         </div>
 
@@ -3423,43 +3496,111 @@ export default function MugenStudio({
 
                 {activeMode === 'Animations' && airData && (
                     <div className="flex flex-col gap-3">
-                        {/* Action select header */}
-                        <div className="bg-[#242424] px-2 py-1.5 border border-[#333] rounded flex items-center justify-between">
-                            <label className="text-[10px] text-gray-400 font-bold uppercase">Anim ID:</label>
-                            <select 
-                                className="bg-[#1e1e1e] border border-[#3c3c3c] text-xs outline-none px-1 rounded text-blue-400 font-mono"
-                                value={selectedActionId ?? ''}
-                                onChange={e => {
-                                    setSelectedActionId(parseInt(e.target.value));
-                                    setCurrentFrame(0);
-                                }}
-                            >
-                                {Object.keys(airData.actions).sort((a,b)=>Number(a)-Number(b)).map(actId => (
-                                    <option key={actId} value={actId}>Action {actId}</option>
-                                ))}
-                            </select>
+                        {/* Action select header & FF3-style Act Name */}
+                        <div className="bg-[#242424] p-2 border border-[#333] rounded flex flex-col gap-2">
+                            <div className="flex items-center justify-between gap-1">
+                                <label className="text-[10px] text-gray-400 font-bold uppercase shrink-0">Act:</label>
+                                <div className="flex items-center gap-1 flex-1 min-w-0">
+                                    <button
+                                        type="button"
+                                        title="Previous Action"
+                                        onClick={() => {
+                                            const ids = Object.keys(airData.actions).map(Number).sort((a, b) => a - b);
+                                            if (!ids.length) return;
+                                            const idx = selectedActionId !== null ? ids.indexOf(selectedActionId) : 0;
+                                            const prevIdx = idx > 0 ? idx - 1 : ids.length - 1;
+                                            setIsPlaying(false);
+                                            setSelectedActionId(ids[prevIdx]);
+                                            setCurrentFrame(0);
+                                        }}
+                                        className="px-1.5 py-0.5 bg-[#1e1e1e] hover:bg-[#333] border border-[#3c3c3c] rounded text-[10px] text-gray-300 font-bold cursor-pointer shrink-0"
+                                    >
+                                        &lt;
+                                    </button>
+                                    <select 
+                                        className="flex-1 min-w-0 bg-[#1e1e1e] border border-[#3c3c3c] text-xs outline-none px-1.5 py-0.5 rounded text-blue-400 font-mono truncate"
+                                        value={selectedActionId ?? ''}
+                                        onChange={e => {
+                                            setIsPlaying(false);
+                                            setSelectedActionId(parseInt(e.target.value));
+                                            setCurrentFrame(0);
+                                        }}
+                                    >
+                                        {Object.keys(airData.actions).sort((a,b)=>Number(a)-Number(b)).map(actId => {
+                                            const actObj = airData.actions[Number(actId)];
+                                            const actLabel = actObj?.name?.trim() ? `${actId} - ${actObj.name.trim()}` : `Action ${actId}`;
+                                            return (
+                                                <option key={actId} value={actId}>{actLabel}</option>
+                                            );
+                                        })}
+                                    </select>
+                                    <button
+                                        type="button"
+                                        title="Next Action"
+                                        onClick={() => {
+                                            const ids = Object.keys(airData.actions).map(Number).sort((a, b) => a - b);
+                                            if (!ids.length) return;
+                                            const idx = selectedActionId !== null ? ids.indexOf(selectedActionId) : -1;
+                                            const nextIdx = idx < ids.length - 1 ? idx + 1 : 0;
+                                            setIsPlaying(false);
+                                            setSelectedActionId(ids[nextIdx]);
+                                            setCurrentFrame(0);
+                                        }}
+                                        className="px-1.5 py-0.5 bg-[#1e1e1e] hover:bg-[#333] border border-[#3c3c3c] rounded text-[10px] text-gray-300 font-bold cursor-pointer shrink-0"
+                                    >
+                                        &gt;
+                                    </button>
+                                </div>
+                            </div>
+                            {selectedActionId !== null && airData.actions[selectedActionId] && (
+                                <div className="flex items-center gap-1.5">
+                                    <label className="text-[10px] text-gray-400 font-semibold shrink-0">Name:</label>
+                                    <input
+                                        type="text"
+                                        value={airData.actions[selectedActionId].name || ''}
+                                        onChange={e => handleRenameAnimAction(selectedActionId, e.target.value)}
+                                        placeholder={getStandardMugenActionHint(selectedActionId)}
+                                        className="flex-1 min-w-0 bg-[#1e1e1e] border border-[#3c3c3c] focus:border-blue-500 text-xs px-2 py-0.5 rounded text-gray-200 outline-none placeholder:text-gray-600"
+                                    />
+                                </div>
+                            )}
                         </div>
 
                         {/* Add/Delete Action Sequence */}
-                        <div className="bg-[#212121] p-2 border border-[#333] rounded flex flex-col gap-2">
+                        <div className="bg-[#212121] p-2 border border-[#333] rounded flex flex-col gap-1.5">
                              <div className="text-[10px] text-gray-400 font-semibold">Sequence Actions Builder</div>
                              <div className="flex gap-1.5">
                                  <input 
                                      type="number"
-                                     className="bg-[#1e1e1e] border border-[#3a3a3a] text-xs text-center w-16 px-1 rounded outline-none"
+                                     className="bg-[#1e1e1e] border border-[#3a3a3a] text-xs text-center w-14 px-1 py-0.5 rounded outline-none font-mono"
                                      value={newActionIdText}
                                      onChange={e => setNewActionIdText(e.target.value)}
-                                     placeholder="Hex/No"
+                                     placeholder="ID"
+                                     title="New Action Number"
                                  />
+                                 <input 
+                                     type="text"
+                                     className="flex-1 min-w-0 bg-[#1e1e1e] border border-[#3a3a3a] focus:border-green-600 text-xs px-1.5 py-0.5 rounded outline-none text-gray-200 placeholder:text-gray-600"
+                                     value={newActionNameText}
+                                     onChange={e => setNewActionNameText(e.target.value)}
+                                     placeholder="Act name (optional)"
+                                     onKeyDown={e => {
+                                         if (e.key === 'Enter') {
+                                             handleAddAnimAction(parseInt(newActionIdText) || 0, newActionNameText);
+                                         }
+                                     }}
+                                 />
+                             </div>
+                             <div className="flex gap-1.5">
                                  <button 
-                                     onClick={() => handleAddAnimAction(parseInt(newActionIdText) || 0)}
-                                     className="flex-1 bg-green-900/40 border border-green-700/80 hover:bg-green-900/60 px-2 py-0.5 rounded text-[10px] font-bold text-green-400"
+                                     onClick={() => handleAddAnimAction(parseInt(newActionIdText) || 0, newActionNameText)}
+                                     className="flex-1 bg-green-900/40 border border-green-700/80 hover:bg-green-900/60 px-2 py-0.5 rounded text-[10px] font-bold text-green-400 cursor-pointer"
                                  >
                                       + Add Act
                                  </button>
                                  <button 
                                      onClick={() => selectedActionId !== null && handleDeleteAnimAction(selectedActionId)}
-                                     className="bg-red-955/40 border border-red-800/80 hover:bg-red-955/60 px-2 py-0.5 rounded text-[10px] font-bold text-red-400"
+                                     className="bg-red-955/40 border border-red-800/80 hover:bg-red-955/60 px-2 py-0.5 rounded text-[10px] font-bold text-red-400 cursor-pointer"
                                  >
                                       Rem Act
                                  </button>
@@ -3841,51 +3982,80 @@ export default function MugenStudio({
                     <div className="flex-1 overflow-y-auto">
                         <div className="text-gray-400 mb-2 font-bold px-1 uppercase text-[10px]">{activeMode} Explorer</div>
                         {Object.keys(activeParsedData).map((group, idx) => {
-                            const displayGroup = group.replace(/\s*##\d+$/, (match) => {
-                                const num = match.trim().replace('##', '');
-                                return num !== '1' ? ` #${num}` : '';
-                            });
+                            const occMatch = group.match(/\s*##(\d+)$/);
+                            const targetOccurrence = occMatch ? parseInt(occMatch[1], 10) : 1;
+                            const cleanGroup = stripIniSuffix(group);
+                            const isCommandBlock = cleanGroup.toLowerCase() === 'command';
+                            const isStateDef = cleanGroup.toLowerCase().startsWith('statedef');
+                            const isStateBlock = cleanGroup.toLowerCase().startsWith('state ');
+                            const sectionData = activeParsedData[group];
+                            const cmdName = isCommandBlock ? getSectionKeyValue(sectionData, 'name') : '';
+                            const cmdKeys = isCommandBlock ? getSectionKeyValue(sectionData, 'command') : '';
+                            const displayGroup = isCommandBlock
+                                ? (cmdName || `Command${targetOccurrence > 1 ? ` #${targetOccurrence}` : ''}`)
+                                : group.replace(/\s*##\d+$/, (match) => {
+                                    const num = match.trim().replace('##', '');
+                                    return num !== '1' ? ` #${num}` : '';
+                                });
+
                             return (
                                 <div 
                                     key={idx} 
                                     onClick={() => {
-                                        const cleanGroup = group.replace(/\s*##\d+$/, '');
-                                        const textarea = document.querySelector('textarea');
-                                        if (textarea) {
-                                            const text = textarea.value;
-                                            const index = text.toLowerCase().indexOf(`[${cleanGroup.toLowerCase()}]`);
-                                            if (index !== -1) {
-                                                textarea.focus();
-                                                textarea.setSelectionRange(index, index + cleanGroup.length + 2);
-                                                const linesCount = text.substring(0, index).split('\n').length;
-                                                textarea.scrollTop = (linesCount - 3) * 18;
+                                        const textarea = codeEditorTextareaRef.current;
+                                        if (!textarea) return;
+                                        const text = textarea.value;
+                                        const lines = text.split('\n');
+                                        const targetHeader = cleanGroup.toLowerCase();
+                                        let seen = 0;
+                                        let charOffset = 0;
+
+                                        for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+                                            const rawLine = lines[lineIdx];
+                                            const semiIdx = rawLine.indexOf(';');
+                                            const codePart = (semiIdx !== -1 ? rawLine.slice(0, semiIdx) : rawLine).trim();
+                                            const headerMatch = codePart.match(/^\[(.*)\]$/);
+                                            if (headerMatch && headerMatch[1].trim().toLowerCase() === targetHeader) {
+                                                seen++;
+                                                if (seen === targetOccurrence) {
+                                                    const bracketPos = rawLine.indexOf('[');
+                                                    const selStart = charOffset + (bracketPos !== -1 ? bracketPos : 0);
+                                                    const closeBracketPos = rawLine.indexOf(']', bracketPos !== -1 ? bracketPos : 0);
+                                                    const selEnd = closeBracketPos !== -1 ? charOffset + closeBracketPos + 1 : selStart + cleanGroup.length + 2;
+                                                    textarea.focus();
+                                                    textarea.setSelectionRange(selStart, selEnd);
+                                                    const computed = window.getComputedStyle(textarea);
+                                                    const lineHeight = parseFloat(computed.lineHeight) || 18;
+                                                    textarea.scrollTop = Math.max(0, (lineIdx - 3) * lineHeight);
+                                                    break;
+                                                }
                                             }
+                                            charOffset += rawLine.length + 1;
                                         }
                                     }}
-                                    className="flex items-center gap-2 px-1 py-1 hover:bg-[#333333] cursor-pointer"
+                                    className={`flex items-center justify-between gap-1.5 px-1.5 py-1 hover:bg-[#333333] cursor-pointer rounded-sm ${isStateBlock ? 'pl-4' : ''}`}
+                                    title={isCommandBlock && cmdKeys ? `${displayGroup}: ${cmdKeys}` : displayGroup}
                                 >
-                                    <span className="text-gray-500 font-mono text-[9px]">{'>'}</span>
-                                    <span className="text-gray-300 truncate" title={displayGroup}>{displayGroup}</span>
+                                    <div className="flex items-center gap-1.5 min-w-0">
+                                        {isCommandBlock ? (
+                                            <span className="text-[8px] font-mono uppercase px-1 py-0.5 rounded bg-amber-950/60 text-amber-400 border border-amber-800/50 shrink-0">CMD</span>
+                                        ) : (
+                                            <span className="text-gray-500 font-mono text-[9px] shrink-0">{'>'}</span>
+                                        )}
+                                        <span className={`truncate ${isStateDef ? 'text-blue-400 font-semibold' : isCommandBlock ? 'text-gray-200 font-mono' : 'text-gray-300'}`}>
+                                            {displayGroup}
+                                        </span>
+                                    </div>
+                                    {isCommandBlock && cmdKeys && (
+                                        <span className="text-[9px] font-mono text-gray-500 truncate max-w-[85px] shrink-0">
+                                            {cmdKeys}
+                                        </span>
+                                    )}
                                 </div>
                             );
                         })}
                     </div>
                 )}
-
-                {activeMode === 'Backgrounds' && (
-                  <div className="flex-1 bg-[#1a1a1a] flex flex-col items-center justify-center p-6 text-center select-none">
-                      <div className="w-24 h-24 bg-gradient-to-br from-zinc-800 to-zinc-900 rounded-3xl border border-zinc-700 flex items-center justify-center mb-6 shadow-2xl">
-                          <Settings className="w-10 h-10 text-zinc-600 animate-spin-slow" />
-                      </div>
-                      <h2 className="text-2xl font-bold text-white mb-2 tracking-tight">Background Studio</h2>
-                      <p className="text-zinc-500 max-w-md text-sm leading-relaxed mb-8">
-                          The M.U.G.E.N stage and background editor is currently under development. This feature will allow you to build parralax stages and layered scenery directly in MUGENStudio.
-                      </p>
-                      <div className="px-4 py-1.5 bg-yellow-900/20 text-yellow-500 border border-yellow-500/20 rounded-full text-[10px] font-bold uppercase tracking-widest">
-                          Work In Progress
-                      </div>
-                  </div>
-              )}
 
               {activeMode === 'Sounds' && (
                     <div className="flex-1 flex flex-col overflow-hidden">
@@ -4252,7 +4422,8 @@ export default function MugenStudio({
                                   </div>
                              </div>
                              <textarea 
-                                 className="w-full flex-1 bg-[#1e1e1e] text-[#d4d4d4] font-mono p-4 outline-none resize-none border-none whitespace-pre-wrap leading-relaxed"
+                                 ref={codeEditorTextareaRef}
+                                 className="w-full flex-1 bg-[#1e1e1e] text-[#d4d4d4] font-mono p-4 outline-none resize-none border-none whitespace-pre overflow-x-auto leading-relaxed"
                                  value={activeText || ''}
                                  onChange={(e) => setActiveText?.(e.target.value)}
                                  spellCheck="false"
@@ -4952,29 +5123,92 @@ export default function MugenStudio({
                 )}
                 {activeMode === 'Animations' && (
                     <>
-                        <div className="bg-[#111111] text-white font-bold py-2 px-3 text-center border-b border-[#333333] uppercase text-[10px] tracking-wider mb-2">
+                        <div className="bg-[#111111] text-white font-bold py-2 px-3 text-center border-b border-[#333333] uppercase text-[10px] tracking-wider">
                             Visual Sprite Picker
+                        </div>
+                        <div className="px-2 pt-2 pb-1 border-b border-[#2b2b2b] bg-[#1a1a1a]">
+                            <input
+                                type="text"
+                                value={pickerSearch}
+                                onChange={e => setPickerSearch(e.target.value)}
+                                placeholder="Filter group, image (e.g. 0,0)..."
+                                className="w-full bg-[#121212] border border-[#333333] focus:border-blue-500 rounded px-2 py-1 text-[10px] text-gray-200 outline-none font-mono placeholder:text-gray-600"
+                            />
                         </div>
                         <div className="flex-1 p-2 overflow-y-auto flex flex-col gap-2">
                            <div className="text-[9px] text-gray-400 italic leading-snug px-1 border-l-2 border-[#555]">
-                               💡 Clicking any sprite block below instantly assigns that (group, image) index to the active animation frame sequence!
+                               Clicking any sprite below assigns its (group, image) to the active animation frame.
                            </div>
                            
-                           {sffData ? (
-                               <div className="grid grid-cols-3 gap-1">
-                                    {sffData.images.map((img, i) => (
-                                        <div 
-                                             key={i} 
-                                             onClick={() => handleLinkSpriteToFrame(img.group, img.image)}
-                                             className="aspect-square bg-[#222222] border border-[#333333] hover:border-blue-500 hover:bg-blue-900/10 cursor-pointer flex flex-col items-center justify-center text-[10px] p-1 rounded transition-all"
-                                             title={`Select Sprite - Group: ${img.group} Image: ${img.image}`}
-                                        >
-                                            <span className="font-mono text-gray-400">{img.group}</span>
-                                            <span className="font-mono text-blue-400">,{img.image}</span>
-                                        </div>
-                                    ))}
-                               </div>
-                           ) : (
+                           {sffData ? (() => {
+                               const activeEl = selectedActionId !== null ? airData?.actions[selectedActionId]?.elements[currentFrame] : null;
+                               const selectionPal = sffData.palettes ? sffData.palettes[selectedPaletteIdx] : null;
+                               const firstSffPal = (sffData.palettes && sffData.palettes.length > 0) ? sffData.palettes[0] : null;
+                               const q = pickerSearch.trim().toLowerCase();
+                               const filteredImages = sffData.images.filter(img => {
+                                   if (!q) return true;
+                                   const pair = `${img.group},${img.image}`;
+                                   const pairSpaced = `${img.group}, ${img.image}`;
+                                   return (
+                                       String(img.group).includes(q) ||
+                                       String(img.image).includes(q) ||
+                                       pair.includes(q) ||
+                                       pairSpaced.includes(q)
+                                   );
+                               });
+
+                               if (filteredImages.length === 0) {
+                                   return (
+                                       <div className="text-gray-500 italic text-center p-4 text-[10px]">
+                                           No sprites match &quot;{pickerSearch}&quot;
+                                       </div>
+                                   );
+                               }
+
+                               return (
+                                   <div className="grid grid-cols-3 gap-1.5">
+                                        {filteredImages.map((img, i) => {
+                                            const effectivePalette = (img.isSharedPalette === false && img.palette)
+                                                ? img.palette
+                                                : (selectionPal?.data || firstSffPal?.data || actPalette || img.palette);
+                                            const isAssigned = Boolean(activeEl && activeEl.group === img.group && activeEl.image === img.image);
+
+                                            return (
+                                                <button
+                                                    key={`${img.group}-${img.image}-${i}`}
+                                                    type="button"
+                                                    onClick={() => handleLinkSpriteToFrame(img.group, img.image)}
+                                                    className={`group flex flex-col overflow-hidden rounded border transition-all cursor-pointer text-left ${
+                                                        isAssigned
+                                                            ? 'border-blue-500 ring-1 ring-blue-500/70 bg-blue-950/30'
+                                                            : 'border-[#333333] bg-[#222222] hover:border-blue-400 hover:bg-[#282d38]'
+                                                    }`}
+                                                    title={`Group ${img.group}, Image ${img.image} (${img.width}x${img.height})`}
+                                                >
+                                                    <div
+                                                        className="w-full aspect-square flex items-center justify-center overflow-hidden bg-[#181818]"
+                                                        style={{
+                                                            backgroundImage:
+                                                                'linear-gradient(45deg, #202020 25%, transparent 25%), linear-gradient(-45deg, #202020 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #202020 75%), linear-gradient(-45deg, transparent 75%, #202020 75%)',
+                                                            backgroundSize: '12px 12px',
+                                                            backgroundPosition: '0 0, 0 6px, 6px -6px, -6px 0px'
+                                                        }}
+                                                    >
+                                                        <SpriteThumbnail sprite={img} palette={effectivePalette} />
+                                                    </div>
+                                                    <div className={`w-full px-1 py-0.5 text-center font-mono text-[9px] truncate border-t ${
+                                                        isAssigned
+                                                            ? 'bg-blue-900/50 border-blue-500/40 text-blue-200 font-bold'
+                                                            : 'bg-[#161616] border-[#2c2c2c] text-gray-300 group-hover:text-white'
+                                                    }`}>
+                                                        {img.group},{img.image}
+                                                    </div>
+                                                </button>
+                                            );
+                                        })}
+                                   </div>
+                               );
+                           })() : (
                                <div className="text-gray-500 italic text-center p-4">No character sprites loaded in memory...</div>
                            )}
                         </div>
@@ -5005,7 +5239,7 @@ export default function MugenStudio({
           {/* Status Bar */}
           <div className="h-6 bg-[#2a2a2a] border-t border-[#111111] flex items-center px-2 text-[10px] text-gray-500 justify-between">
               <div>Position: 0, 0</div>
-              <div>Project: {iniData?.Info?.name || 'Character, Unknown / not set'}</div>
+              <div>Project: {getIniField(iniData, 'Info', 'name') || 'Character, Unknown / not set'}</div>
               <div>Zoom: {zoom * 100}% | Hover to see coordinates</div>
           </div>
       </div>
@@ -5353,6 +5587,83 @@ function FF3SpriteRenderer({ sprite, act, zoom, showAxis, pan, previewOffset, se
     );
 }
 
+const STANDARD_MUGEN_ACTION_NAMES: Record<number, string> = {
+  0: 'Standing',
+  5: 'Turning',
+  6: 'Crouch Turning',
+  10: 'Stand to Crouch',
+  11: 'Crouching',
+  12: 'Crouch to Stand',
+  20: 'Walk Forward',
+  21: 'Walk Backward',
+  40: 'Jump Start',
+  41: 'Jump Up',
+  42: 'Jump Forward',
+  43: 'Jump Backward',
+  44: 'Jump Up (Down)',
+  45: 'Jump Forward (Down)',
+  46: 'Jump Backward (Down)',
+  47: 'Jump Land',
+  100: 'Run Forward',
+  105: 'Hop Backward',
+  120: 'Guard Start (Stand)',
+  121: 'Guard Start (Crouch)',
+  122: 'Guard Start (Air)',
+  130: 'Guard (Stand)',
+  131: 'Guard (Crouch)',
+  132: 'Guard (Air)',
+  140: 'Guard End (Stand)',
+  141: 'Guard End (Crouch)',
+  142: 'Guard End (Air)',
+  150: 'Guard Hit (Stand)',
+  151: 'Guard Hit (Crouch)',
+  152: 'Guard Hit (Air)',
+  170: 'Lose',
+  180: 'Win',
+  190: 'Intro',
+  195: 'Taunt',
+  200: 'Stand Light Punch',
+  210: 'Stand Medium Punch',
+  220: 'Stand Strong Punch',
+  230: 'Stand Light Kick',
+  240: 'Stand Medium Kick',
+  250: 'Stand Strong Kick',
+  400: 'Crouch Light Punch',
+  410: 'Crouch Medium Punch',
+  420: 'Crouch Strong Punch',
+  430: 'Crouch Light Kick',
+  440: 'Crouch Medium Kick',
+  450: 'Crouch Strong Kick',
+  600: 'Jump Light Punch',
+  610: 'Jump Medium Punch',
+  620: 'Jump Strong Punch',
+  630: 'Jump Light Kick',
+  640: 'Jump Medium Kick',
+  650: 'Jump Strong Kick',
+  800: 'Throw Attempt',
+  5000: 'Stand Hit (Light)',
+  5001: 'Stand Hit (Medium)',
+  5002: 'Stand Hit (Hard)',
+  5010: 'Stand Hit Low (Light)',
+  5020: 'Crouch Hit (Light)',
+  5030: 'Air Hit / Knockback',
+  5050: 'Falling',
+  5070: 'Tripped',
+  5080: 'Liedown',
+  5100: 'Bounce on Ground',
+  5110: 'Lie Dead / Down',
+  5120: 'Get Up',
+  5150: 'Defeated',
+  5200: 'Air Recover (Near Ground)',
+  5210: 'Air Recover (Midair)',
+  5300: 'Dizzy'
+};
+
+function getStandardMugenActionHint(actionId: number): string {
+  const std = STANDARD_MUGEN_ACTION_NAMES[actionId];
+  return std ? `e.g. ${std}` : 'e.g. Standing, Light Punch...';
+}
+
 const spriteCanvasCache = new WeakMap<any, Map<any, HTMLCanvasElement>>();
 
 function getCachedSpriteCanvas(sprite: any, palette: Uint8Array): HTMLCanvasElement {
@@ -5383,6 +5694,43 @@ function getCachedSpriteCanvas(sprite: any, palette: Uint8Array): HTMLCanvasElem
   }
   
   return cachedCanvas;
+}
+
+function SpriteThumbnail({ sprite, palette }: { sprite: any; palette: Uint8Array | null | undefined }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!sprite || !sprite.pixelIndices || !palette || sprite.width <= 0 || sprite.height <= 0) return;
+
+    const srcCanvas = getCachedSpriteCanvas(sprite, palette);
+    const pad = 4;
+    const availW = canvas.width - pad * 2;
+    const availH = canvas.height - pad * 2;
+    const scale = Math.min(availW / sprite.width, availH / sprite.height, 2);
+    const drawW = Math.max(1, Math.round(sprite.width * scale));
+    const drawH = Math.max(1, Math.round(sprite.height * scale));
+    const dx = Math.floor((canvas.width - drawW) / 2);
+    const dy = Math.floor((canvas.height - drawH) / 2);
+
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(srcCanvas, dx, dy, drawW, drawH);
+  }, [sprite, palette, sprite?.pixelIndices, sprite?.width, sprite?.height]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={64}
+      height={64}
+      className="w-full h-full object-contain pointer-events-none"
+      style={{ imageRendering: 'pixelated' }}
+    />
+  );
 }
 
 function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis, pan, previewOffset, activeTool, selectedClsn, setSelectedClsn, onUpdateBox }: { 

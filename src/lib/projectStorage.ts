@@ -12,6 +12,7 @@ export interface SavedProject {
   spriteCount?: number;
   animCount?: number;
   soundCount?: number;
+  portraitDataUrl?: string | null;
   iniData?: any;
   iniRawText?: string | null;
   stFiles?: any[];
@@ -154,12 +155,55 @@ export async function deleteProject(id: string): Promise<void> {
       const store = tx.objectStore(STORE_NAME);
       const request = store.delete(id);
 
-      request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
-      tx.oncomplete = () => db.close();
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
+      tx.onabort = () => {
+        db.close();
+        reject(tx.error || new Error('Delete transaction aborted'));
+      };
     });
   } catch (err) {
     console.error(`Failed to delete project ${id}:`, err);
+    throw err;
+  }
+}
+
+/**
+ * Deletes multiple projects by ID in a single IndexedDB transaction.
+ */
+export async function deleteProjects(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  try {
+    const db = await openDatabase();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      for (const id of ids) {
+        store.delete(id);
+      }
+
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
+      tx.onabort = () => {
+        db.close();
+        reject(tx.error || new Error('Batch delete transaction aborted'));
+      };
+    });
+  } catch (err) {
+    console.error('Failed to delete projects:', err);
     throw err;
   }
 }

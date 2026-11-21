@@ -37,9 +37,10 @@ export interface AirData {
 export interface AirAction {
   id: number;
   name?: string;
+  loopstartIndex?: number;
   elements: AirElement[];
-  clsn1: ClsnBox[]; // Attack boxes - Red
-  clsn2: ClsnBox[]; // Defense boxes - Blue
+  clsn1: ClsnBox[]; // Default Attack boxes - Red
+  clsn2: ClsnBox[]; // Default Defense boxes - Blue
 }
 
 export interface AirElement {
@@ -50,6 +51,8 @@ export interface AirElement {
   time: number;
   flip: string;
   color: string;
+  clsn1?: ClsnBox[]; // Frame-specific Attack boxes - Red
+  clsn2?: ClsnBox[]; // Frame-specific Defense boxes - Blue
 }
 
 export interface ClsnBox {

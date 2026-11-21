@@ -13,7 +13,7 @@ import {
   Trash2
 } from 'lucide-react';
 import { LanguagePicker } from './LanguagePicker';
-import { getAllProjects, deleteProject, SavedProject } from '../lib/projectStorage';
+import { getAllProjects, deleteProject, deleteProjects, SavedProject } from '../lib/projectStorage';
 
 interface HomeScreenProps {
   onNewProject: () => void;
@@ -34,6 +34,9 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   const zipInputRef = React.useRef<HTMLInputElement>(null);
   const folderInputRef = React.useRef<HTMLInputElement>(null);
   const [savedProjects, setSavedProjects] = useState<SavedProject[]>([]);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [confirmClearAutoSaves, setConfirmClearAutoSaves] = useState(false);
 
   useEffect(() => {
     const loadSaved = async () => {
@@ -47,15 +50,30 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
     loadSaved();
   }, []);
 
-  const handleDeleteProject = async (id: string, e: React.MouseEvent) => {
+  const handleConfirmDeleteProject = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (confirm("Are you sure you want to delete this saved project?")) {
-      try {
-        await deleteProject(id);
-        setSavedProjects(prev => prev.filter(p => p.id !== id));
-      } catch (err) {
-        console.error("Failed to delete project:", err);
-      }
+    e.preventDefault();
+    setDeletingId(id);
+    try {
+      await deleteProject(id);
+      setSavedProjects(prev => prev.filter(p => p.id !== id));
+      setConfirmDeleteId(null);
+    } catch (err) {
+      console.error("Failed to delete project:", err);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const handleClearAutoSaves = async () => {
+    const autoIds = savedProjects.filter(p => p.isAutoSave).map(p => p.id);
+    if (autoIds.length === 0) return;
+    try {
+      await deleteProjects(autoIds);
+      setSavedProjects(prev => prev.filter(p => !p.isAutoSave));
+      setConfirmClearAutoSaves(false);
+    } catch (err) {
+      console.error("Failed to clear auto-saves:", err);
     }
   };
 
@@ -157,52 +175,146 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
         {/* Saved Projects & Auto-Saves */}
         {savedProjects.length > 0 && (
           <div className="mb-24">
-            <div className="flex items-center justify-between mb-6">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
               <h3 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
                 <Clock className="w-5 h-5 text-purple-400" /> Saved Projects & Auto-Saves
               </h3>
-              <span className="text-xs text-zinc-500">{savedProjects.length} project(s) stored locally</span>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-zinc-500">{savedProjects.length} project(s) stored locally</span>
+                {savedProjects.some(p => p.isAutoSave) && (
+                  confirmClearAutoSaves ? (
+                    <div className="flex items-center gap-1.5 bg-red-950/50 border border-red-700/50 rounded-lg px-2 py-1">
+                      <span className="text-[11px] text-red-200 font-medium">Delete all auto-saves?</span>
+                      <button
+                        type="button"
+                        onClick={handleClearAutoSaves}
+                        className="px-2 py-0.5 rounded bg-red-600 hover:bg-red-500 text-white text-[11px] font-semibold cursor-pointer transition-colors"
+                      >
+                        Yes
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmClearAutoSaves(false)}
+                        className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] font-medium cursor-pointer transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmClearAutoSaves(true)}
+                      className="px-2.5 py-1 rounded-lg bg-zinc-900 hover:bg-red-950/40 border border-zinc-800 hover:border-red-700/50 text-zinc-400 hover:text-red-300 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Clear Auto-Saves
+                    </button>
+                  )
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {savedProjects.map((proj) => (
-                <div 
-                  key={proj.id}
-                  onClick={() => onOpenSavedProject(proj)}
-                  className="bg-zinc-900/80 border border-zinc-800 hover:border-purple-500/50 rounded-2xl p-5 transition-all duration-300 cursor-pointer group flex flex-col justify-between"
-                >
-                  <div>
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="w-10 h-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400 group-hover:bg-purple-500 group-hover:text-white transition-colors">
-                        <Box className="w-5 h-5" />
+              {savedProjects.map((proj) => {
+                const isConfirming = confirmDeleteId === proj.id;
+                const isDeleting = deletingId === proj.id;
+                return (
+                  <div 
+                    key={proj.id}
+                    onClick={() => {
+                      if (!isConfirming && !isDeleting) onOpenSavedProject(proj);
+                    }}
+                    className="bg-zinc-900/80 border border-zinc-800 hover:border-purple-500/50 rounded-2xl p-5 transition-all duration-300 cursor-pointer group flex flex-col justify-between"
+                  >
+                    <div>
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="w-12 h-12 rounded-xl bg-zinc-950 border border-purple-500/25 flex items-center justify-center text-purple-400 overflow-hidden shrink-0">
+                          {proj.portraitDataUrl ? (
+                            <img
+                              src={proj.portraitDataUrl}
+                              alt={proj.name || 'Character portrait'}
+                              className="w-full h-full object-contain"
+                              style={{ imageRendering: 'pixelated' }}
+                            />
+                          ) : (
+                            <Box className="w-5 h-5" />
+                          )}
+                        </div>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400 border border-zinc-700">
+                          {proj.isAutoSave ? 'Auto-Saved' : 'Saved'}
+                        </span>
                       </div>
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400 border border-zinc-700">
-                        {proj.isAutoSave ? 'Auto-Saved' : 'Saved'}
-                      </span>
+
+                      <h4 className="font-bold text-white text-base mb-1 truncate group-hover:text-purple-300 transition-colors">
+                        {proj.name || 'Untitled Character'}
+                      </h4>
+                      <p className="text-xs text-zinc-500 mb-3">
+                        Updated {new Date(proj.updatedAt).toLocaleString()}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono text-zinc-400 mb-3">
+                        <span>{proj.spriteCount ?? proj.sffData?.images?.length ?? 0} sprites</span>
+                        <span className="text-zinc-600">·</span>
+                        <span>{proj.animCount ?? 0} anims</span>
+                        <span className="text-zinc-600">·</span>
+                        <span>{proj.soundCount ?? proj.sndData?.sounds?.length ?? 0} sounds</span>
+                      </div>
                     </div>
 
-                    <h4 className="font-bold text-white text-base mb-1 truncate group-hover:text-purple-300 transition-colors">
-                      {proj.name || 'Untitled Character'}
-                    </h4>
-                    <p className="text-xs text-zinc-500 mb-4">
-                      Updated {new Date(proj.updatedAt).toLocaleString()}
-                    </p>
-                  </div>
-
-                  <div className="flex items-center justify-between pt-3 border-t border-zinc-800/80">
-                    <span className="text-xs text-purple-400 font-medium group-hover:underline flex items-center gap-1">
-                      Resume Project →
-                    </span>
-                    <button
-                      onClick={(e) => handleDeleteProject(proj.id, e)}
-                      className="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"
-                      title="Delete Project"
+                    <div
+                      className="flex items-center justify-between pt-3 border-t border-zinc-800/80"
+                      onClick={(e) => {
+                        if (isConfirming) e.stopPropagation();
+                      }}
                     >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                      {isConfirming ? (
+                        <div className="w-full flex items-center justify-between gap-2">
+                          <span className="text-xs text-red-300 font-medium">Delete this project?</span>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              disabled={isDeleting}
+                              onClick={(e) => handleConfirmDeleteProject(proj.id, e)}
+                              className="px-2.5 py-1 rounded bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-xs font-semibold cursor-pointer transition-colors"
+                            >
+                              {isDeleting ? 'Deleting...' : 'Delete'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isDeleting}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                e.preventDefault();
+                                setConfirmDeleteId(null);
+                              }}
+                              className="px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium cursor-pointer transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <span className="text-xs text-purple-400 font-medium group-hover:underline flex items-center gap-1">
+                            Resume Project →
+                          </span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              setConfirmDeleteId(proj.id);
+                            }}
+                            className="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded cursor-pointer transition-colors"
+                            title="Delete Project"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}

@@ -4,7 +4,8 @@ import { motion } from 'motion/react';
 import { 
   File as FileIcon, FolderOpen, Save, Undo, Redo, Scissors, Copy, Clipboard,
   Search, ArrowLeftRight, ZoomIn, ZoomOut, Plus, Minus, Play, Pause, AlertCircle, HelpCircle, FileText as FileTextIcon, Image as ImageIcon, PlayCircle, Settings, Trash2, Pen, Move, Hand, PaintBucket, Wand2, Crosshair,
-  Volume2, Music, Download, PlusCircle, Square, Eraser, Palette, Zap, Box, Upload
+  Volume2, Music, Download, PlusCircle, Square, Eraser, Palette, Zap, Box, Upload,
+  Pipette, Crop, FlipHorizontal, FlipVertical, Layers, Film, Gamepad2, AlertTriangle, CheckCircle2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { parseIniString, stringifyIni, getIniField, getSectionKeyValue, stripIniSuffix, updateIniTextField } from '../lib/mugen/defParser';
@@ -18,6 +19,54 @@ import { parseSndBinary, buildSndBinary } from '../lib/mugen/sndParser';
 import type { SndSound, SndData } from '../lib/mugen/sndParser';
 import { LanguagePicker } from './LanguagePicker';
 import { saveProject, SavedProject } from '../lib/projectStorage';
+import { MugenCodeEditor, MugenCodeEditorHandle } from './MugenCodeEditor';
+import { SoundWaveform } from './SoundWaveform';
+import { MoveTesterModal } from './MoveTesterModal';
+import { exportActionGif, exportActionSpriteSheet } from '../lib/mugen/gifEncoder';
+import { validateMugenProject, MugenIssue } from '../lib/mugen/validator';
+
+function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0;
+  const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      case b: h = (r - g) / d + 4; break;
+    }
+    h /= 6;
+  }
+  return [h * 360, s * 100, l * 100];
+}
+
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  h = ((h % 360) + 360) % 360 / 360;
+  s = Math.max(0, Math.min(100, s)) / 100;
+  l = Math.max(0, Math.min(100, l)) / 100;
+  if (s === 0) {
+    const v = Math.round(l * 255);
+    return [v, v, v];
+  }
+  const hue2rgb = (p: number, q: number, t: number) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return [
+    Math.round(hue2rgb(p, q, h + 1 / 3) * 255),
+    Math.round(hue2rgb(p, q, h) * 255),
+    Math.round(hue2rgb(p, q, h - 1 / 3) * 255),
+  ];
+}
 
 
 interface MugenStudioProps {
@@ -180,6 +229,13 @@ export default function MugenStudio({
               title: `[${cleanSec}] in ${file.filename}`,
               subtitle: `State Definition`,
               action: () => {
+                const occMatch = sec.match(/\s*##(\d+)$/);
+                pendingCodeJumpRef.current = {
+                  mode: 'States',
+                  fileId: file.id,
+                  header: cleanSec,
+                  occurrence: occMatch ? parseInt(occMatch[1], 10) : 1
+                };
                 setActiveMode('States');
                 setActiveStFileId(file.id);
                 setIsSearchModalOpen(false);
@@ -194,6 +250,12 @@ export default function MugenStudio({
                 title: `${cleanKey} = ${v} ([${cleanSec}])`,
                 subtitle: `Found in ${file.filename}`,
                 action: () => {
+                  const matchedLine = findLineInText(file.content, cleanKey, String(v), cleanSec);
+                  pendingCodeJumpRef.current = {
+                    mode: 'States',
+                    fileId: file.id,
+                    line: matchedLine || 1
+                  };
                   setActiveMode('States');
                   setActiveStFileId(file.id);
                   setIsSearchModalOpen(false);
@@ -231,6 +293,12 @@ export default function MugenStudio({
                 title: cmdLabel ? `[Command] ${cmdLabel}: ${cleanKey} = ${v}` : `${cleanKey} = ${v}`,
                 subtitle: `Section [${cleanSec}] in ${file.filename}`,
                 action: () => {
+                  const matchedLine = findLineInText(file.content, cleanKey, String(v), cleanSec);
+                  pendingCodeJumpRef.current = {
+                    mode: 'Commands',
+                    fileId: file.id,
+                    line: matchedLine || 1
+                  };
                   setActiveMode('Commands');
                   setActiveCmdFileId(file.id);
                   setIsSearchModalOpen(false);
@@ -254,6 +322,11 @@ export default function MugenStudio({
               title: `${cleanKey} = ${v}`,
               subtitle: `Section [${cleanSec}] (DEF)`,
               action: () => {
+                const matchedLine = findLineInText(iniRawText || '', cleanKey, String(v), cleanSec);
+                pendingCodeJumpRef.current = {
+                  mode: 'Definitions',
+                  line: matchedLine || 1
+                };
                 setActiveMode('Definitions');
                 setIsSearchModalOpen(false);
               }
@@ -472,13 +545,13 @@ export default function MugenStudio({
     if (!action) return;
     const element = action.elements[currentFrame];
     if (!element) return;
-    
-    // In M.U.G.E.N AIR, specific frames can have their own CLSNDEFs, 
-    // but usually they are defined at the action level and applied.
-    // We'll copy whatever hitboxes are currently active.
+
+    const srcClsn1 = clsnScope === 'frame' ? (element.clsn1 || []) : (action.clsn1 || []);
+    const srcClsn2 = clsnScope === 'frame' ? (element.clsn2 || []) : (action.clsn2 || []);
+
     setClsnClipboard({
-      clsn1: JSON.parse(JSON.stringify(action.clsn1 || [])),
-      clsn2: JSON.parse(JSON.stringify(action.clsn2 || []))
+      clsn1: JSON.parse(JSON.stringify(srcClsn1)),
+      clsn2: JSON.parse(JSON.stringify(srcClsn2))
     });
   };
 
@@ -489,11 +562,19 @@ export default function MugenStudio({
 
     const nextAir = { ...airData };
     const nextAction = { ...action };
-    
-    // M.U.G.E.N CLSN paste usually replaces or appends. 
-    // We'll replace for simplicity as it's the most common "duplicate frame setup" use case.
-    nextAction.clsn1 = JSON.parse(JSON.stringify(clsnClipboard.clsn1));
-    nextAction.clsn2 = JSON.parse(JSON.stringify(clsnClipboard.clsn2));
+
+    if (clsnScope === 'frame' && nextAction.elements[currentFrame]) {
+      const nextElements = [...nextAction.elements];
+      nextElements[currentFrame] = {
+        ...nextElements[currentFrame],
+        clsn1: JSON.parse(JSON.stringify(clsnClipboard.clsn1)),
+        clsn2: JSON.parse(JSON.stringify(clsnClipboard.clsn2)),
+      };
+      nextAction.elements = nextElements;
+    } else {
+      nextAction.clsn1 = JSON.parse(JSON.stringify(clsnClipboard.clsn1));
+      nextAction.clsn2 = JSON.parse(JSON.stringify(clsnClipboard.clsn2));
+    }
 
     nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
     setAirData(nextAir);
@@ -587,6 +668,8 @@ export default function MugenStudio({
   const [zoom, setZoom] = useState(2);
   const [showClsn, setShowClsn] = useState(true);
   const [showAxis, setShowAxis] = useState(true);
+  const [showOnionSkin, setShowOnionSkin] = useState(true);
+  const [clsnScope, setClsnScope] = useState<'action' | 'frame'>('action');
 
   const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
 
@@ -597,6 +680,23 @@ export default function MugenStudio({
   const [newActionIdText, setNewActionIdText] = useState('100');
   const [newActionNameText, setNewActionNameText] = useState('');
   const [pickerSearch, setPickerSearch] = useState('');
+
+  // Palette Range HSL states
+  const [palRangeFrom, setPalRangeFrom] = useState<number>(1);
+  const [palRangeTo, setPalRangeTo] = useState<number>(255);
+  const [palHue, setPalHue] = useState<number>(0);
+  const [palSat, setPalSat] = useState<number>(0);
+  const [palLight, setPalLight] = useState<number>(0);
+
+  // Bottom Panel & Move Tester states
+  const [activeBottomTab, setActiveBottomTab] = useState<'issues' | 'search' | 'output'>('issues');
+  const [engineLogs, setEngineLogs] = useState<string[]>([]);
+  const [showMoveTester, setShowMoveTester] = useState(false);
+
+  const appendEngineLog = (msg: string) => {
+    const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setEngineLogs(prev => [`[${ts}] ${msg}`, ...prev].slice(0, 60));
+  };
 
   // Pivot drags & Canvas interactions
   const [isDragging, setIsDragging] = useState(false);
@@ -609,7 +709,7 @@ export default function MugenStudio({
   const [panOrig, setPanOrig] = useState({ x: 0, y: 0 });
   const [pan, setPan] = useState({ x: 0, y: 0 });
 
-  const [activeTool, setActiveTool] = useState<'move' | 'pan' | 'paint' | 'eraser' | 'bucket' | 'wand' | 'clsn_edit' | 'select'>('move');
+  const [activeTool, setActiveTool] = useState<'move' | 'pan' | 'paint' | 'eraser' | 'eyedropper' | 'bucket' | 'wand' | 'clsn_edit' | 'select'>('move');
   const [brushSize, setBrushSize] = useState<number>(1);
   const [isPaintDragging, setIsPaintDragging] = useState(false);
   const [lastPaintPos, setLastPaintPos] = useState<{x: number, y: number} | null>(null);
@@ -641,9 +741,54 @@ export default function MugenStudio({
   // Input refs
   const fileInputRef = useRef<HTMLInputElement>(null);
   const spritePngInputRef = useRef<HTMLInputElement>(null);
+  const batchPngInputRef = useRef<HTMLInputElement>(null);
   const replaceSpriteInputRef = useRef<HTMLInputElement>(null);
   const addSoundInputRef = useRef<HTMLInputElement>(null);
-  const codeEditorTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const codeEditorRef = useRef<MugenCodeEditorHandle>(null);
+  const pendingCodeJumpRef = useRef<{ mode: 'Definitions' | 'Commands' | 'States'; fileId?: string; line?: number; header?: string; occurrence?: number } | null>(null);
+
+  const findLineInText = (text: string, key: string, val: string, secName: string): number | null => {
+    const lines = text.split('\n');
+    const secLow = secName.toLowerCase();
+    const keyLow = key.toLowerCase();
+    const valLow = val.toLowerCase();
+    let currentSec = '';
+    for (let i = 0; i < lines.length; i++) {
+      const semi = lines[i].indexOf(';');
+      const code = (semi !== -1 ? lines[i].slice(0, semi) : lines[i]).trim();
+      const secM = code.match(/^\[(.*)\]$/);
+      if (secM) {
+        currentSec = secM[1].trim().toLowerCase();
+        continue;
+      }
+      if (currentSec === secLow && code.toLowerCase().startsWith(keyLow) && code.toLowerCase().includes(valLow)) {
+        return i + 1;
+      }
+    }
+    return null;
+  };
+
+  const issues = useMemo<MugenIssue[]>(() => {
+    return validateMugenProject({ iniData, sffData, airData, stFiles, cmdFiles });
+  }, [iniData, sffData, airData, stFiles, cmdFiles]);
+
+  useEffect(() => {
+    const pending = pendingCodeJumpRef.current;
+    if (!pending) return;
+    if (pending.mode !== activeMode) return;
+    if (pending.mode === 'States' && pending.fileId && pending.fileId !== activeStFileId) return;
+    if (pending.mode === 'Commands' && pending.fileId && pending.fileId !== activeCmdFileId) return;
+
+    const raf = requestAnimationFrame(() => {
+      if (pending.line) {
+        codeEditorRef.current?.jumpToLine(pending.line);
+      } else if (pending.header) {
+        codeEditorRef.current?.jumpToHeader(pending.header, pending.occurrence || 1);
+      }
+      pendingCodeJumpRef.current = null;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [activeMode, activeStFileId, activeCmdFileId, stFiles, cmdFiles, iniRawText]);
 
   useEffect(() => {
     if (initialProject) {
@@ -798,6 +943,8 @@ export default function MugenStudio({
         if (!isInputField) {
           if (e.key.toLowerCase() === 'e' && activeMode === 'Sprites') {
             setActiveTool('eraser');
+          } else if (e.key.toLowerCase() === 'i' && activeMode === 'Sprites') {
+            setActiveTool('eyedropper');
           } else if ((e.key.toLowerCase() === 'b' || e.key.toLowerCase() === 'p') && activeMode === 'Sprites') {
             setActiveTool('paint');
           } else if (e.key.toLowerCase() === 'g' && activeMode === 'Sprites') {
@@ -894,14 +1041,49 @@ export default function MugenStudio({
     };
   };
 
+  const generatePortraitDataUrl = (): string | null => {
+    try {
+      if (!sffData || sffData.images.length === 0) return null;
+      const portraitSprite =
+        sffData.images.find(img => img.group === 9000 && img.image === 0) ||
+        sffData.images.find(img => img.group === 9000 && img.image === 1) ||
+        sffData.images[0];
+      if (!portraitSprite || !portraitSprite.pixelIndices || portraitSprite.width <= 0 || portraitSprite.height <= 0) {
+        return null;
+      }
+      const pal =
+        (portraitSprite.isSharedPalette === false && portraitSprite.palette)
+          ? portraitSprite.palette
+          : (sffData.palettes?.[0]?.data || actPalette || portraitSprite.palette);
+      if (!pal) return null;
+
+      const src = getCachedSpriteCanvas(portraitSprite, pal);
+      const out = document.createElement('canvas');
+      out.width = 64;
+      out.height = 64;
+      const ctx = out.getContext('2d');
+      if (!ctx) return null;
+      const scale = Math.min(60 / portraitSprite.width, 60 / portraitSprite.height);
+      const dw = Math.max(1, Math.round(portraitSprite.width * scale));
+      const dh = Math.max(1, Math.round(portraitSprite.height * scale));
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(src, Math.floor((64 - dw) / 2), Math.floor((64 - dh) / 2), dw, dh);
+      return out.toDataURL('image/png');
+    } catch {
+      return null;
+    }
+  };
+
   const saveProjectToLocalStorage = async (isAuto: boolean = false) => {
     try {
       const projectName = getIniField(iniData, 'Info', 'name') || 'Untitled Character';
+      const portraitDataUrl = generatePortraitDataUrl();
       const projectState: SavedProject = {
         id: projectId,
         name: projectName,
         updatedAt: Date.now(),
         isAutoSave: isAuto,
+        portraitDataUrl,
         iniData,
         iniRawText,
         stFiles,
@@ -916,6 +1098,7 @@ export default function MugenStudio({
       setLastAutoSavedAt(new Date());
       
       if (!isAuto) {
+        appendEngineLog(`Saved project "${projectName}" to local database.`);
         setSaveNotification("Project saved to local storage successfully!");
         setTimeout(() => setSaveNotification(null), 3000);
       }
@@ -1398,6 +1581,16 @@ export default function MugenStudio({
               }
           }
 
+          if (activeTool === 'eyedropper') {
+              if (localX >= 0 && localX < sprite.width && localY >= 0 && localY < sprite.height) {
+                  const picked = sprite.pixelIndices[localY * sprite.width + localX];
+                  setSelectedPalColorIdx(picked);
+                  setSaveNotification(`Eyedropper picked Palette Index #${picked}`);
+                  setTimeout(() => setSaveNotification(null), 1500);
+              }
+              return;
+          }
+
           if (activeTool === 'select') {
               setIsSelecting(true);
               setSelectionStartPos({ x: localX, y: localY });
@@ -1635,8 +1828,11 @@ export default function MugenStudio({
           const ticks = parsedTime <= 0 ? 30 : parsedTime;
           const baseDuration = ticks * (1000 / 60);
           const duration = baseDuration / playbackSpeed;
+          const loopTarget = (action.loopstartIndex !== undefined && action.loopstartIndex >= 0 && action.loopstartIndex < action.elements.length)
+            ? action.loopstartIndex
+            : 0;
           timer = setTimeout(() => {
-            setCurrentFrame(prev => (prev + 1) % action.elements.length);
+            setCurrentFrame(prev => (prev + 1 >= action.elements.length ? loopTarget : prev + 1));
           }, duration);
         }
       }
@@ -1691,14 +1887,47 @@ export default function MugenStudio({
 
     if (collectedEntries.length === 0) return;
 
-    // Parse .def first so we know target anim/sprite/sound/pal filenames if multiple files exist
+    // Parse .def first so we know target anim/sprite/sound/pal filenames, then sff before act so palettes attach cleanly
     let targetAnimFile = '';
+    const defPalOrder: string[] = [];
     const defEntries = collectedEntries.filter(f => f.name.split('.').pop()?.toLowerCase() === 'def');
-    const otherEntries = collectedEntries.filter(f => f.name.split('.').pop()?.toLowerCase() !== 'def');
-    const orderedEntries = [...defEntries, ...otherEntries];
+    const sffEntries = collectedEntries.filter(f => f.name.split('.').pop()?.toLowerCase() === 'sff');
+    const actEntriesRaw = collectedEntries.filter(f => f.name.split('.').pop()?.toLowerCase() === 'act');
+    const restEntries = collectedEntries.filter(f => {
+      const e = f.name.split('.').pop()?.toLowerCase();
+      return e !== 'def' && e !== 'sff' && e !== 'act';
+    });
+
+    if (defEntries.length > 0) {
+      try {
+        const previewDefText = await defEntries[0].text();
+        const previewDef = parseIniString(previewDefText);
+        for (let pi = 1; pi <= 12; pi++) {
+          const pField = getIniField(previewDef, 'Files', `pal${pi}`);
+          if (pField) {
+            const pBase = pField.split(/[/\\]/).pop()?.trim().toLowerCase();
+            if (pBase && !defPalOrder.includes(pBase)) defPalOrder.push(pBase);
+          }
+        }
+      } catch {}
+    }
+
+    const actEntries = [...actEntriesRaw].sort((a, b) => {
+      const aName = a.name.split(/[/\\]/).pop()?.toLowerCase() || '';
+      const bName = b.name.split(/[/\\]/).pop()?.toLowerCase() || '';
+      const ia = defPalOrder.indexOf(aName);
+      const ib = defPalOrder.indexOf(bName);
+      if (ia !== -1 && ib !== -1) return ia - ib;
+      if (ia !== -1) return -1;
+      if (ib !== -1) return 1;
+      return aName.localeCompare(bName);
+    });
+
+    const orderedEntries = [...defEntries, ...sffEntries, ...actEntries, ...restEntries];
 
     const hasActInSelection = collectedEntries.some(f => f.name.toLowerCase().endsWith('.act'));
     let airLoadedFromDefTarget = false;
+    let actBatchIndex = 0;
 
     for (const file of orderedEntries) {
         const ext = file.name.split('.').pop()?.toLowerCase();
@@ -1713,7 +1942,7 @@ export default function MugenStudio({
                 if (defAnim) {
                   targetAnimFile = defAnim.split(/[/\\]/).pop()?.trim().toLowerCase() || '';
                 }
-            } else if (ext === 'cns' || ext === 'st') {
+            } else if (ext === 'cns' || /^st\d*$/i.test(ext || '') || /^cns\d*$/i.test(ext || '')) {
                 const text = await file.text();
                 const fileId = `file-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
                 setStFiles(prev => {
@@ -1758,17 +1987,31 @@ export default function MugenStudio({
             } else if (ext === 'act') {
                 const buffer = await file.arrayBuffer();
                 const paletteData = parseActBinary(buffer);
-                setActPalette(paletteData);
-                
-                // Also add to SFF palettes if possible
+                const curActIdx = actBatchIndex++;
+                if (curActIdx === 0) {
+                  setActPalette(paletteData);
+                  setSelectedPaletteIdx(0);
+                }
+
+                // Add every distinct .act palette slot (1,1), (1,2), ... to SFF palettes
                 setSffData(prev => {
                     if (!prev) return prev;
                     const nextPalettes = [...(prev.palettes || [])];
-                    const existingIdx = nextPalettes.findIndex(p => p.group === 1 && p.item === 1);
-                    if (existingIdx >= 0) {
+                    if (curActIdx === 0) {
+                      const existingIdx = nextPalettes.findIndex(p => p.group === 1 && p.item === 1);
+                      if (existingIdx >= 0) {
                         nextPalettes[existingIdx] = { ...nextPalettes[existingIdx], data: paletteData };
+                      } else {
+                        nextPalettes.unshift({ group: 1, item: 1, data: paletteData });
+                      }
                     } else {
-                        nextPalettes.push({ group: 1, item: 1, data: paletteData });
+                      const targetItem = curActIdx + 1;
+                      const existingIdx = nextPalettes.findIndex(p => p.group === 1 && p.item === targetItem);
+                      if (existingIdx >= 0) {
+                        nextPalettes[existingIdx] = { ...nextPalettes[existingIdx], data: paletteData };
+                      } else {
+                        nextPalettes.push({ group: 1, item: targetItem, data: paletteData });
+                      }
                     }
                     return { ...prev, palettes: nextPalettes };
                 });
@@ -2047,6 +2290,359 @@ export default function MugenStudio({
     syncAirRawText(nextAir);
   };
 
+  const handleMoveFrameOrder = (direction: -1 | 1) => {
+    if (!airData || selectedActionId === null) return;
+    const action = airData.actions[selectedActionId];
+    if (!action) return;
+    const targetIdx = currentFrame + direction;
+    if (targetIdx < 0 || targetIdx >= action.elements.length) return;
+
+    const nextElements = [...action.elements];
+    const [moved] = nextElements.splice(currentFrame, 1);
+    nextElements.splice(targetIdx, 0, moved);
+
+    let nextLoop = action.loopstartIndex;
+    if (nextLoop === currentFrame) nextLoop = targetIdx;
+    else if (nextLoop === targetIdx) nextLoop = currentFrame;
+
+    const nextAction = { ...action, elements: nextElements, loopstartIndex: nextLoop };
+    const nextAir = { ...airData, actions: { ...airData.actions, [selectedActionId]: nextAction } };
+    airDataRef.current = nextAir;
+    setAirData(nextAir);
+    setCurrentFrame(targetIdx);
+    syncAirRawText(nextAir);
+    pushToHistory(undefined, nextAir);
+  };
+
+  const handleToggleLoopstart = () => {
+    if (!airData || selectedActionId === null) return;
+    const action = airData.actions[selectedActionId];
+    if (!action) return;
+    const nextLoop = action.loopstartIndex === currentFrame ? undefined : currentFrame;
+    const nextAction = { ...action, loopstartIndex: nextLoop };
+    const nextAir = { ...airData, actions: { ...airData.actions, [selectedActionId]: nextAction } };
+    airDataRef.current = nextAir;
+    setAirData(nextAir);
+    syncAirRawText(nextAir);
+    pushToHistory(undefined, nextAir);
+  };
+
+  const handleApplyOffsetToAllFrames = () => {
+    if (!airData || selectedActionId === null) return;
+    const action = airData.actions[selectedActionId];
+    const curr = action?.elements[currentFrame];
+    if (!action || !curr) return;
+    const nextElements = action.elements.map(el => ({ ...el, xOffset: curr.xOffset, yOffset: curr.yOffset }));
+    const nextAction = { ...action, elements: nextElements };
+    const nextAir = { ...airData, actions: { ...airData.actions, [selectedActionId]: nextAction } };
+    airDataRef.current = nextAir;
+    setAirData(nextAir);
+    syncAirRawText(nextAir);
+    pushToHistory(undefined, nextAir);
+    appendEngineLog(`Applied offset (${curr.xOffset}, ${curr.yOffset}) to all ${nextElements.length} frames in Action ${selectedActionId}.`);
+  };
+
+  const handleAutoCropSprite = () => {
+    if (!sffData || selectedSpriteIdx === null) return;
+    const sprite = sffData.images[selectedSpriteIdx];
+    if (!sprite || sprite.width <= 0 || sprite.height <= 0) return;
+
+    const w = sprite.width;
+    const h = sprite.height;
+    let minX = w, minY = h, maxX = -1, maxY = -1;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (sprite.pixelIndices[y * w + x] !== 0) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < minX || maxY < minY) {
+      alert('Sprite is completely empty (all index 0).');
+      return;
+    }
+    if (minX === 0 && minY === 0 && maxX === w - 1 && maxY === h - 1) {
+      setSaveNotification('Sprite is already tightly cropped!');
+      setTimeout(() => setSaveNotification(null), 1500);
+      return;
+    }
+
+    const newW = maxX - minX + 1;
+    const newH = maxY - minY + 1;
+    const cropPixels = (src: Uint8Array) => {
+      const dst = new Uint8Array(newW * newH);
+      for (let y = 0; y < newH; y++) {
+        for (let x = 0; x < newW; x++) {
+          dst[y * newW + x] = src[(y + minY) * w + (x + minX)];
+        }
+      }
+      return dst;
+    };
+
+    const nextSprite = {
+      ...sprite,
+      width: newW,
+      height: newH,
+      xOffset: sprite.xOffset - minX,
+      yOffset: sprite.yOffset - minY,
+      pixelIndices: cropPixels(sprite.pixelIndices),
+    };
+    const nextImages = [...sffData.images];
+    nextImages[selectedSpriteIdx] = nextSprite;
+    const nextSff = { ...sffData, images: nextImages };
+    sffDataRef.current = nextSff;
+    setSffData(nextSff);
+
+    const existingLayers = spriteLayersMapRef.current[selectedSpriteIdx];
+    if (existingLayers) {
+      const nextLayers = existingLayers.map(l => ({ ...l, pixelIndices: cropPixels(l.pixelIndices) }));
+      setSpriteLayersMap(prev => {
+        const nextMap = { ...prev, [selectedSpriteIdx]: nextLayers };
+        spriteLayersMapRef.current = nextMap;
+        return nextMap;
+      });
+    }
+    pushToHistory(nextSff);
+    appendEngineLog(`Auto-cropped sprite (${sprite.group},${sprite.image}) from ${w}x${h} to ${newW}x${newH}.`);
+  };
+
+  const handleFlipSpritePixels = (axis: 'h' | 'v') => {
+    if (!sffData || selectedSpriteIdx === null) return;
+    const sprite = sffData.images[selectedSpriteIdx];
+    if (!sprite || sprite.width <= 0 || sprite.height <= 0) return;
+
+    const w = sprite.width;
+    const h = sprite.height;
+    const flipBuf = (src: Uint8Array) => {
+      const dst = new Uint8Array(w * h);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const sx = axis === 'h' ? w - 1 - x : x;
+          const sy = axis === 'v' ? h - 1 - y : y;
+          dst[y * w + x] = src[sy * w + sx];
+        }
+      }
+      return dst;
+    };
+
+    const layers = getSpriteLayers(selectedSpriteIdx, sprite);
+    const flippedLayers = layers.map(l => ({ ...l, pixelIndices: flipBuf(l.pixelIndices) }));
+    updateLayersForSprite(selectedSpriteIdx, flippedLayers);
+    pushToHistory();
+  };
+
+  const handleNudgeSpritePixels = (dx: number, dy: number) => {
+    if (!sffData || selectedSpriteIdx === null) return;
+    const sprite = sffData.images[selectedSpriteIdx];
+    if (!sprite || sprite.width <= 0 || sprite.height <= 0) return;
+
+    const w = sprite.width;
+    const h = sprite.height;
+    const shiftBuf = (src: Uint8Array) => {
+      const dst = new Uint8Array(w * h);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+            dst[ny * w + nx] = src[y * w + x];
+          }
+        }
+      }
+      return dst;
+    };
+
+    const layers = getSpriteLayers(selectedSpriteIdx, sprite);
+    const shiftedLayers = layers.map(l => ({ ...l, pixelIndices: shiftBuf(l.pixelIndices) }));
+    updateLayersForSprite(selectedSpriteIdx, shiftedLayers);
+    pushToHistory();
+  };
+
+  const handleBatchImportPngs = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []) as File[];
+    if (files.length === 0) return;
+
+    const currentSff = sffData || {
+      version: '1.1',
+      numGroups: 1,
+      numImages: 0,
+      images: [],
+      palettes: [],
+    };
+    const activePal =
+      currentSff.palettes?.[selectedPaletteIdx]?.data ||
+      currentSff.palettes?.[0]?.data ||
+      actPalette ||
+      currentSff.images[0]?.palette ||
+      null;
+
+    let nextG = 0;
+    let nextI = 0;
+    if (currentSff.images.length > 0) {
+      const last = currentSff.images[currentSff.images.length - 1];
+      nextG = last.group;
+      nextI = last.image + 1;
+    }
+
+    const newImages = [...currentSff.images];
+    let firstAddedIdx = newImages.length;
+
+    for (const file of files) {
+      const buffer = await file.arrayBuffer();
+      const blob = new Blob([buffer]);
+      const url = URL.createObjectURL(blob);
+      await new Promise<void>(resolve => {
+        const img = new Image();
+        img.onload = () => {
+          const off = document.createElement('canvas');
+          off.width = img.width;
+          off.height = img.height;
+          const ctx = off.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0);
+            const imgData = ctx.getImageData(0, 0, img.width, img.height);
+            const { indices, palette } = imageToSpriteIndices(imgData.data, img.width, img.height, activePal);
+            newImages.push({
+              group: nextG,
+              image: nextI++,
+              xOffset: Math.round(img.width / 2),
+              yOffset: img.height - 4,
+              width: img.width,
+              height: img.height,
+              pixelIndices: indices,
+              isSharedPalette: Boolean(activePal),
+              comment: file.name,
+              palette: activePal ? undefined : palette,
+            });
+          }
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        img.onerror = () => {
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        img.src = url;
+      });
+    }
+
+    const nextSff: SffData = {
+      ...currentSff,
+      images: newImages,
+      numImages: newImages.length,
+    };
+    sffDataRef.current = nextSff;
+    setSffData(nextSff);
+    if (firstAddedIdx < newImages.length) {
+      setSelectedSpriteIdx(firstAddedIdx);
+    }
+    pushToHistory(nextSff);
+    appendEngineLog(`Batch imported ${files.length} PNG sprite(s) quantized to active palette.`);
+    if (batchPngInputRef.current) batchPngInputRef.current.value = '';
+  };
+
+  const handleApplyPaletteRangeHsl = () => {
+    const activePal =
+      sffData?.palettes?.[selectedPaletteIdx]?.data ||
+      actPalette ||
+      sffData?.images[selectedSpriteIdx]?.palette;
+    if (!activePal) return;
+
+    const from = Math.max(1, Math.min(255, palRangeFrom));
+    const to = Math.max(from, Math.min(255, palRangeTo));
+    const nextPal = new Uint8Array(activePal);
+
+    for (let idx = from; idx <= to; idx++) {
+      const off = idx * 4;
+      const [h, s, l] = rgbToHsl(nextPal[off], nextPal[off + 1], nextPal[off + 2]);
+      const [nr, ng, nb] = hslToRgb(h + palHue, s + palSat, l + palLight);
+      nextPal[off] = nr;
+      nextPal[off + 1] = ng;
+      nextPal[off + 2] = nb;
+      nextPal[off + 3] = 255;
+    }
+
+    if (sffData && sffData.palettes && sffData.palettes[selectedPaletteIdx]) {
+      const nextPalettes = [...sffData.palettes];
+      nextPalettes[selectedPaletteIdx] = { ...nextPalettes[selectedPaletteIdx], data: nextPal };
+      const nextSff = { ...sffData, palettes: nextPalettes };
+      sffDataRef.current = nextSff;
+      setSffData(nextSff);
+    }
+    setActPalette(nextPal);
+    setPalHue(0);
+    setPalSat(0);
+    setPalLight(0);
+    pushToHistory();
+    appendEngineLog(`Applied HSL shift to palette indices ${from}..${to}.`);
+  };
+
+  const handleExportStandaloneSff = () => {
+    if (!sffData) return;
+    const buffer = buildSffBinary(sffData);
+    const blob = new Blob([buffer], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${getIniField(iniData, 'Info', 'name') || 'character'}.sff`;
+    a.click();
+    URL.revokeObjectURL(url);
+    appendEngineLog(`Exported standalone .SFF (${sffData.images.length} sprites).`);
+  };
+
+  const handleExportStandaloneAir = () => {
+    const content = airRawText || (airData ? serializeAirData(airData) : '');
+    if (!content) return;
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${getIniField(iniData, 'Info', 'name') || 'character'}.air`;
+    a.click();
+    URL.revokeObjectURL(url);
+    appendEngineLog('Exported standalone .AIR file.');
+  };
+
+  const handleExportActionGifFile = () => {
+    if (!sffData || !airData || selectedActionId === null) return;
+    const action = airData.actions[selectedActionId];
+    if (!action || action.elements.length === 0) return;
+    const pal =
+      sffData.palettes?.[selectedPaletteIdx]?.data ||
+      sffData.palettes?.[0]?.data ||
+      actPalette;
+    const blob = exportActionGif(sffData, action, pal);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `action_${selectedActionId}.gif`;
+    a.click();
+    URL.revokeObjectURL(url);
+    appendEngineLog(`Exported Action ${selectedActionId} animated GIF.`);
+  };
+
+  const handleExportActionSheetFile = async () => {
+    if (!sffData || !airData || selectedActionId === null) return;
+    const action = airData.actions[selectedActionId];
+    if (!action || action.elements.length === 0) return;
+    const pal =
+      sffData.palettes?.[selectedPaletteIdx]?.data ||
+      sffData.palettes?.[0]?.data ||
+      actPalette;
+    const blob = await exportActionSpriteSheet(sffData, action, pal);
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `action_${selectedActionId}_sheet.png`;
+    a.click();
+    URL.revokeObjectURL(url);
+    appendEngineLog(`Exported Action ${selectedActionId} PNG sprite sheet.`);
+  };
+
   const handleAddCollisionBox = (clsnType: 1 | 2) => {
     if (!airData || selectedActionId === null) return;
     const action = airData.actions[selectedActionId];
@@ -2062,11 +2658,25 @@ export default function MugenStudio({
 
       const nextAir = { ...prevAir };
       const nextAction = { ...act };
-      if (clsnType === 1) {
-        nextAction.clsn1 = [...nextAction.clsn1, newBox];
+
+      if (clsnScope === 'frame' && nextAction.elements[currentFrame]) {
+        const nextElements = [...nextAction.elements];
+        const el = { ...nextElements[currentFrame] };
+        if (clsnType === 1) {
+          el.clsn1 = [...(el.clsn1 ?? act.clsn1), newBox];
+        } else {
+          el.clsn2 = [...(el.clsn2 ?? act.clsn2), newBox];
+        }
+        nextElements[currentFrame] = el;
+        nextAction.elements = nextElements;
       } else {
-        nextAction.clsn2 = [...nextAction.clsn2, newBox];
+        if (clsnType === 1) {
+          nextAction.clsn1 = [...nextAction.clsn1, newBox];
+        } else {
+          nextAction.clsn2 = [...nextAction.clsn2, newBox];
+        }
       }
+
       nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
       syncAirRawText(nextAir);
       return nextAir;
@@ -2087,11 +2697,25 @@ export default function MugenStudio({
 
       const nextAir = { ...prevAir };
       const nextAction = { ...act };
-      if (clsnType === 1) {
-        nextAction.clsn1 = nextAction.clsn1.filter((b: any) => b.id !== boxId);
+
+      if (clsnScope === 'frame' && nextAction.elements[currentFrame]) {
+        const nextElements = [...nextAction.elements];
+        const el = { ...nextElements[currentFrame] };
+        if (clsnType === 1) {
+          el.clsn1 = (el.clsn1 || []).filter((b: any) => b.id !== boxId);
+        } else {
+          el.clsn2 = (el.clsn2 || []).filter((b: any) => b.id !== boxId);
+        }
+        nextElements[currentFrame] = el;
+        nextAction.elements = nextElements;
       } else {
-        nextAction.clsn2 = nextAction.clsn2.filter((b: any) => b.id !== boxId);
+        if (clsnType === 1) {
+          nextAction.clsn1 = nextAction.clsn1.filter((b: any) => b.id !== boxId);
+        } else {
+          nextAction.clsn2 = nextAction.clsn2.filter((b: any) => b.id !== boxId);
+        }
       }
+
       nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
       syncAirRawText(nextAir);
       return nextAir;
@@ -2125,10 +2749,25 @@ export default function MugenStudio({
         return { ...b, [fieldOrUpdates]: value };
       };
 
-      if (clsnType === 1) {
-        nextAction.clsn1 = nextAction.clsn1.map(updateBoxObj);
+      const el = nextAction.elements[currentFrame];
+      const useFrameBoxes = clsnScope === 'frame' || (el && (clsnType === 1 ? el.clsn1 !== undefined : el.clsn2 !== undefined));
+
+      if (useFrameBoxes && el) {
+        const nextElements = [...nextAction.elements];
+        const nextEl = { ...el };
+        if (clsnType === 1) {
+          nextEl.clsn1 = (nextEl.clsn1 ?? act.clsn1).map(updateBoxObj);
+        } else {
+          nextEl.clsn2 = (nextEl.clsn2 ?? act.clsn2).map(updateBoxObj);
+        }
+        nextElements[currentFrame] = nextEl;
+        nextAction.elements = nextElements;
       } else {
-        nextAction.clsn2 = nextAction.clsn2.map(updateBoxObj);
+        if (clsnType === 1) {
+          nextAction.clsn1 = nextAction.clsn1.map(updateBoxObj);
+        } else {
+          nextAction.clsn2 = nextAction.clsn2.map(updateBoxObj);
+        }
       }
 
       nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
@@ -2756,6 +3395,62 @@ export default function MugenStudio({
         <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.paste') || 'Paste'} onClick={() => { if(activeMode==='Sprites') handlePasteSprite(); else if(activeMode==='Animations') handlePasteCLSN(); }}><Clipboard size={16} color="#9ca3af" /></button>
         <div className="w-px h-6 bg-[#1a1a1a] mx-1 shrink-0" />
         <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.search') || 'Search'} onClick={() => setIsSearchModalOpen(true)}><Search size={16} color="#9ca3af" /></button>
+        <div className="w-px h-6 bg-[#1a1a1a] mx-1 shrink-0" />
+        <button
+          className="px-2 py-1 hover:bg-emerald-600/30 bg-emerald-950/50 border border-emerald-700/60 rounded shrink-0 flex items-center gap-1 text-[10px] font-bold text-emerald-300 transition-colors"
+          title="Open Mini Playable Move Tester Sandbox"
+          onClick={() => setShowMoveTester(true)}
+        >
+          <Gamepad2 size={14} />
+          <span>Test Moves</span>
+        </button>
+        <div className="w-px h-6 bg-[#1a1a1a] mx-1 shrink-0" />
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            className="px-2 py-1 bg-[#252525] hover:bg-[#353535] border border-[#3e3e3e] rounded text-[10px] font-mono text-zinc-200 flex items-center gap-1 transition-colors"
+            title="Quick Export Standalone .SFF"
+            onClick={handleExportStandaloneSff}
+          >
+            <Download size={11} className="text-blue-400" />
+            <span>.SFF</span>
+          </button>
+          <button
+            className="px-2 py-1 bg-[#252525] hover:bg-[#353535] border border-[#3e3e3e] rounded text-[10px] font-mono text-zinc-200 flex items-center gap-1 transition-colors"
+            title="Quick Export Standalone .AIR"
+            onClick={handleExportStandaloneAir}
+          >
+            <Download size={11} className="text-teal-400" />
+            <span>.AIR</span>
+          </button>
+          <button
+            className="px-2 py-1 bg-[#252525] hover:bg-[#353535] border border-[#3e3e3e] rounded text-[10px] font-mono text-zinc-200 flex items-center gap-1 transition-colors"
+            title="Quick Export Active .ACT Palette"
+            onClick={handleSavePalette}
+          >
+            <Download size={11} className="text-purple-400" />
+            <span>.ACT</span>
+          </button>
+          {activeMode === 'Animations' && selectedActionId !== null && (
+            <>
+              <button
+                className="px-2 py-1 bg-amber-950/50 hover:bg-amber-900/60 border border-amber-700/60 rounded text-[10px] font-mono text-amber-300 flex items-center gap-1 transition-colors"
+                title="Export Current Action as Animated .GIF"
+                onClick={handleExportActionGifFile}
+              >
+                <Film size={11} />
+                <span>GIF</span>
+              </button>
+              <button
+                className="px-2 py-1 bg-cyan-950/50 hover:bg-cyan-900/60 border border-cyan-700/60 rounded text-[10px] font-mono text-cyan-300 flex items-center gap-1 transition-colors"
+                title="Export Current Action as Horizontal Sprite Sheet (.PNG)"
+                onClick={handleExportActionSheetFile}
+              >
+                <Layers size={11} />
+                <span>Sheet</span>
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Mobile Tabs */}
@@ -2783,7 +3478,7 @@ export default function MugenStudio({
       </div>
 
       {/* Main Workspace */}
-      <div className="flex flex-1 overflow-hidden relative">
+      <div className="flex flex-1 min-h-0 overflow-hidden relative">
          {/* Left Panel */}
          <div 
              onMouseDown={e => e.stopPropagation()}
@@ -2793,7 +3488,7 @@ export default function MugenStudio({
              onTouchMove={e => e.stopPropagation()}
              onTouchEnd={e => e.stopPropagation()}
              onClick={e => e.stopPropagation()}
-             className={`md:w-72 w-full border-r border-[#111111] bg-[#1e1e1e] flex-col select-none ${mobileTab === 'left' ? 'flex absolute inset-0 z-30 md:relative' : 'hidden md:flex'}`}
+             className={`md:w-72 w-full min-h-0 border-r border-[#111111] bg-[#1e1e1e] flex-col select-none ${mobileTab === 'left' ? 'flex absolute inset-0 z-30 md:relative' : 'hidden md:flex'}`}
          >
             <div className="bg-[#111111] text-gray-300 font-bold py-2 px-3 flex justify-between items-center border-b border-[#333333]">
                 <span className="uppercase text-[10px] tracking-wider">{t(`studio.modes.${activeMode.toLowerCase()}`)} {t('studio.properties')}</span>
@@ -2993,14 +3688,24 @@ export default function MugenStudio({
                                             {t('common.clone')}
                                         </button>
                                     </div>
-                                    <button 
-                                        onClick={handleExportAllSpritesZip}
-                                        className="px-3 py-1.5 bg-zinc-800 border border-[#444] rounded hover:bg-zinc-700 text-zinc-300 font-bold text-center flex items-center justify-center gap-1.5"
-                                        title="Export all sprites as a ZIP package of PNGs"
-                                    >
-                                        <Download size={12} />
-                                        {t('common.exportAll')}
-                                    </button>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <button 
+                                            onClick={handleExportAllSpritesZip}
+                                            className="px-2 py-1.5 bg-zinc-800 border border-[#444] rounded hover:bg-zinc-700 text-zinc-300 font-bold text-center flex items-center justify-center gap-1 text-[10px]"
+                                            title="Export all sprites as a ZIP package of PNGs"
+                                        >
+                                            <Download size={11} />
+                                            {t('common.exportAll')}
+                                        </button>
+                                        <button 
+                                            onClick={() => batchPngInputRef.current?.click()}
+                                            className="px-2 py-1.5 bg-emerald-950/40 border border-emerald-700/70 rounded hover:bg-emerald-900/60 text-emerald-300 font-bold text-center flex items-center justify-center gap-1 text-[10px]"
+                                            title="Batch import multiple PNGs auto-quantized to the active palette"
+                                        >
+                                            <Upload size={11} />
+                                            Batch PNGs
+                                        </button>
+                                    </div>
                                     <button 
                                         onClick={handleExportSelectedSpritesZip}
                                         disabled={selectedSpriteIndices.size === 0}
@@ -3018,6 +3723,14 @@ export default function MugenStudio({
                                         type="file" 
                                         ref={spritePngInputRef} 
                                         onChange={handleImportSpriteFile} 
+                                        accept="image/png, image/jpeg" 
+                                        className="hidden" 
+                                    />
+                                    <input 
+                                        type="file" 
+                                        ref={batchPngInputRef} 
+                                        onChange={handleBatchImportPngs} 
+                                        multiple
                                         accept="image/png, image/jpeg" 
                                         className="hidden" 
                                     />
@@ -3064,8 +3777,49 @@ export default function MugenStudio({
                                             <input type="number" className="bg-[#1e1e1e] border border-[#3a3a3a] px-2 py-1 text-center outline-none text-xs rounded" value={sffData.images[selectedSpriteIdx]?.yOffset ?? 0} onChange={e => handleUpdateSprite('yOffset', parseInt(e.target.value) || 0)} />
                                         </div>
                                     </div>
-                                    <div className="text-[9px] text-gray-500 text-center italic mt-1 pb-1">
+                                    <div className="text-[9px] text-gray-500 text-center italic pb-1">
                                         Drag the image on the canvas to adjust visually
+                                    </div>
+
+                                    {/* Auto-Crop & Pixel Transforms */}
+                                    <div className="text-[10px] font-semibold text-gray-400 border-b border-[#333] pb-1">Sprite Pixel Transforms</div>
+                                    <div className="grid grid-cols-3 gap-1.5">
+                                        <button
+                                            type="button"
+                                            onClick={handleAutoCropSprite}
+                                            className="px-2 py-1 bg-amber-950/40 hover:bg-amber-900/60 border border-amber-700/60 rounded text-[10px] text-amber-300 font-semibold flex items-center justify-center gap-1"
+                                            title="Trim transparent borders and preserve pivot alignment"
+                                        >
+                                            <Crop size={11} />
+                                            <span>Crop</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => handleFlipSpritePixels('h')}
+                                            className="px-2 py-1 bg-[#1e1e1e] hover:bg-[#333] border border-[#3a3a3a] rounded text-[10px] text-gray-200 font-semibold flex items-center justify-center gap-1"
+                                            title="Flip sprite pixels horizontally"
+                                        >
+                                            <FlipHorizontal size={11} />
+                                            <span>Flip H</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => handleFlipSpritePixels('v')}
+                                            className="px-2 py-1 bg-[#1e1e1e] hover:bg-[#333] border border-[#3a3a3a] rounded text-[10px] text-gray-200 font-semibold flex items-center justify-center gap-1"
+                                            title="Flip sprite pixels vertically"
+                                        >
+                                            <FlipVertical size={11} />
+                                            <span>Flip V</span>
+                                        </button>
+                                    </div>
+                                    <div className="flex items-center justify-between gap-1 bg-[#1a1a1a] border border-[#333] rounded px-2 py-1">
+                                        <span className="text-[9px] text-gray-400 font-semibold">1px Nudge:</span>
+                                        <div className="flex items-center gap-1">
+                                            <button type="button" onClick={() => handleNudgeSpritePixels(-1, 0)} className="p-1 bg-[#2a2a2a] hover:bg-[#3a3a3a] rounded text-gray-200" title="Nudge Left 1px"><ArrowLeft size={10} /></button>
+                                            <button type="button" onClick={() => handleNudgeSpritePixels(0, -1)} className="p-1 bg-[#2a2a2a] hover:bg-[#3a3a3a] rounded text-gray-200" title="Nudge Up 1px"><ArrowUp size={10} /></button>
+                                            <button type="button" onClick={() => handleNudgeSpritePixels(0, 1)} className="p-1 bg-[#2a2a2a] hover:bg-[#3a3a3a] rounded text-gray-200" title="Nudge Down 1px"><ArrowDown size={10} /></button>
+                                            <button type="button" onClick={() => handleNudgeSpritePixels(1, 0)} className="p-1 bg-[#2a2a2a] hover:bg-[#3a3a3a] rounded text-gray-200" title="Nudge Right 1px"><ArrowRight size={10} /></button>
+                                        </div>
                                     </div>
                                 </div>
 
@@ -3167,6 +3921,77 @@ export default function MugenStudio({
                                                  No palettes detected in SFF. Import an .act file to begin.
                                              </div>
                                          )}
+                                     </div>
+
+                                     {/* Quick Palette Preset Switcher */}
+                                     {sffData.palettes && sffData.palettes.length > 1 && (
+                                         <div className="flex flex-wrap gap-1 pt-1">
+                                             {sffData.palettes.map((pal, i) => (
+                                                 <button
+                                                     key={`pill-${i}`}
+                                                     type="button"
+                                                     onClick={() => setSelectedPaletteIdx(i)}
+                                                     className={`px-2 py-0.5 rounded text-[9px] font-mono border transition-colors ${selectedPaletteIdx === i ? 'bg-purple-600 text-white border-purple-400 font-bold' : 'bg-[#222] text-gray-400 border-[#3a3a3a] hover:text-white'}`}
+                                                 >
+                                                     Pal {pal.group},{pal.item}
+                                                 </button>
+                                             ))}
+                                         </div>
+                                     )}
+
+                                     {/* FF3-style Palette Range HSL Editor */}
+                                     <div className="bg-[#212121] border border-[#333] rounded p-2.5 flex flex-col gap-2 mt-1">
+                                         <div className="text-[10px] font-bold text-purple-300 uppercase tracking-wide border-b border-[#333] pb-1">
+                                             Palette Range HSL Shift
+                                         </div>
+                                         <div className="grid grid-cols-2 gap-2">
+                                             <div className="flex flex-col gap-0.5">
+                                                 <span className="text-[9px] text-gray-400">From Idx (1-255)</span>
+                                                 <input
+                                                     type="number"
+                                                     min={1}
+                                                     max={255}
+                                                     value={palRangeFrom}
+                                                     onChange={e => setPalRangeFrom(Math.max(1, Math.min(255, parseInt(e.target.value) || 1)))}
+                                                     className="bg-[#141414] border border-[#3a3a3a] rounded px-1.5 py-0.5 text-[10px] font-mono text-center text-gray-200"
+                                                 />
+                                             </div>
+                                             <div className="flex flex-col gap-0.5">
+                                                 <span className="text-[9px] text-gray-400">To Idx (1-255)</span>
+                                                 <input
+                                                     type="number"
+                                                     min={1}
+                                                     max={255}
+                                                     value={palRangeTo}
+                                                     onChange={e => setPalRangeTo(Math.max(1, Math.min(255, parseInt(e.target.value) || 255)))}
+                                                     className="bg-[#141414] border border-[#3a3a3a] rounded px-1.5 py-0.5 text-[10px] font-mono text-center text-gray-200"
+                                                 />
+                                             </div>
+                                         </div>
+                                         <div className="flex flex-col gap-1 text-[9px] text-gray-400">
+                                             <label className="flex justify-between">
+                                                 <span>Hue Shift</span>
+                                                 <span className="font-mono text-purple-300">{palHue}°</span>
+                                             </label>
+                                             <input type="range" min={-180} max={180} value={palHue} onChange={e => setPalHue(parseInt(e.target.value, 10))} className="accent-purple-500 h-1.5" />
+                                             <label className="flex justify-between">
+                                                 <span>Saturation</span>
+                                                 <span className="font-mono text-purple-300">{palSat > 0 ? `+${palSat}` : palSat}%</span>
+                                             </label>
+                                             <input type="range" min={-100} max={100} value={palSat} onChange={e => setPalSat(parseInt(e.target.value, 10))} className="accent-purple-500 h-1.5" />
+                                             <label className="flex justify-between">
+                                                 <span>Lightness</span>
+                                                 <span className="font-mono text-purple-300">{palLight > 0 ? `+${palLight}` : palLight}%</span>
+                                             </label>
+                                             <input type="range" min={-100} max={100} value={palLight} onChange={e => setPalLight(parseInt(e.target.value, 10))} className="accent-purple-500 h-1.5" />
+                                         </div>
+                                         <button
+                                             type="button"
+                                             onClick={handleApplyPaletteRangeHsl}
+                                             className="w-full py-1.5 bg-purple-700/80 hover:bg-purple-600 text-white rounded text-[10px] font-bold transition-colors"
+                                         >
+                                             Apply HSL Shift
+                                         </button>
                                      </div>
 
                                      {/* Export current */}
@@ -3685,8 +4510,61 @@ export default function MugenStudio({
                                     </div>
                                 </div>
 
+                                <div className="flex flex-col gap-0.5 mt-1">
+                                    <span className="text-[9px] text-gray-400">Transparency / Blending:</span>
+                                    <select 
+                                        className="bg-[#1a1a1a] border border-[#3a3a3a] text-xs p-1 rounded outline-none"
+                                        value={airData.actions[selectedActionId].elements[currentFrame]?.color || ""}
+                                        onChange={e => handleUpdateFrameField('color', e.target.value)}
+                                    >
+                                        <option value="">Opaque (Default)</option>
+                                        <option value="A">Additive Alpha (A)</option>
+                                        <option value="A1">Additive 50% (A1)</option>
+                                        <option value="S">Subtractive (S)</option>
+                                    </select>
+                                </div>
+
+                                {/* Frame Reorder, Loopstart & Batch Offset */}
+                                <div className="grid grid-cols-2 gap-1.5 mt-1 pt-1.5 border-t border-[#333]">
+                                    <button
+                                        type="button"
+                                        onClick={() => handleMoveFrameOrder(-1)}
+                                        disabled={currentFrame <= 0}
+                                        className="bg-[#1e1e1e] border border-[#3a3a3a] hover:bg-[#333] disabled:opacity-40 p-1 text-[9px] font-bold text-gray-200 rounded"
+                                    >
+                                        &larr; Move Left
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => handleMoveFrameOrder(1)}
+                                        disabled={currentFrame >= airData.actions[selectedActionId].elements.length - 1}
+                                        className="bg-[#1e1e1e] border border-[#3a3a3a] hover:bg-[#333] disabled:opacity-40 p-1 text-[9px] font-bold text-gray-200 rounded"
+                                    >
+                                        Move Right &rarr;
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleToggleLoopstart}
+                                        className={`p-1 text-[9px] font-bold rounded border transition-colors ${
+                                            airData.actions[selectedActionId].loopstartIndex === currentFrame
+                                                ? 'bg-emerald-700/60 border-emerald-500 text-white'
+                                                : 'bg-[#1e1e1e] border-[#3a3a3a] text-emerald-400 hover:bg-[#333]'
+                                        }`}
+                                    >
+                                        {airData.actions[selectedActionId].loopstartIndex === currentFrame ? 'Loopstart ✓' : 'Set Loopstart'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleApplyOffsetToAllFrames}
+                                        className="bg-indigo-950/50 border border-indigo-700/70 hover:bg-indigo-900/60 p-1 text-[9px] font-bold text-indigo-300 rounded"
+                                        title="Copy this frame's X/Y offset to all frames in this action"
+                                    >
+                                        Offset to All
+                                    </button>
+                                </div>
+
                                 {/* Frame Sequence Multipliers */}
-                                <div className="grid grid-cols-3 gap-1 mt-2 Pt-1 border-t border-[#333]">
+                                <div className="grid grid-cols-3 gap-1 mt-1 pt-1.5 border-t border-[#333]">
                                      <button onClick={handleAddFrame} className="bg-blue-900/30 border border-blue-700/80 hover:bg-blue-900/50 p-1 text-[9px] font-bold text-blue-400 rounded">Add Frame</button>
                                      <button onClick={handleDuplicateFrame} className="bg-yellow-950/30 border border-yellow-800 hover:bg-yellow-950/50 p-1 text-[9px] font-bold text-yellow-500 rounded">Duplicate</button>
                                      <button onClick={handleDeleteFrame} className="bg-red-955/30 border border-red-800 hover:bg-red-955/50 p-1 text-[9px] font-bold text-red-500 rounded">Del Frame</button>
@@ -3695,9 +4573,62 @@ export default function MugenStudio({
                         )}
 
                         {/* Collision Box (CLSN) Designer block */}
-                        {selectedActionId !== null && airData.actions[selectedActionId] && (
+                        {selectedActionId !== null && airData.actions[selectedActionId] && (() => {
+                            const activeAct = airData.actions[selectedActionId];
+                            const activeEl = activeAct.elements[currentFrame];
+                            const hasPerFrameOverride = Boolean(activeEl && (activeEl.clsn1 !== undefined || activeEl.clsn2 !== undefined));
+                            const displayedClsn2 = clsnScope === 'frame' ? (activeEl?.clsn2 ?? []) : activeAct.clsn2;
+                            const displayedClsn1 = clsnScope === 'frame' ? (activeEl?.clsn1 ?? []) : activeAct.clsn1;
+
+                            return (
                             <div className="bg-[#242424] p-3 border border-[#333] rounded flex flex-col gap-2">
-                                <div className="text-[10px] text-gray-400 font-semibold border-b border-[#333] pb-1">Collision Boxes Designer</div>
+                                <div className="flex items-center justify-between border-b border-[#333] pb-1">
+                                    <span className="text-[10px] text-gray-400 font-semibold">Collision Boxes Designer</span>
+                                    {hasPerFrameOverride && (
+                                        <span className="text-[8px] px-1.5 py-0.5 rounded bg-amber-950/70 text-amber-300 border border-amber-700/50 font-bold">
+                                            PER-FRAME
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="grid grid-cols-2 gap-1 bg-[#181818] p-1 rounded border border-[#333]">
+                                    <button
+                                        type="button"
+                                        onClick={() => setClsnScope('action')}
+                                        className={`py-1 rounded text-[9px] font-bold transition-colors ${clsnScope === 'action' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                                    >
+                                        Action Default
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setClsnScope('frame')}
+                                        className={`py-1 rounded text-[9px] font-bold transition-colors ${clsnScope === 'frame' ? 'bg-amber-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                                    >
+                                        Frame #{currentFrame + 1}
+                                    </button>
+                                </div>
+                                {clsnScope === 'frame' && hasPerFrameOverride && (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setAirData(prevAir => {
+                                                if (!prevAir || selectedActionId === null) return prevAir;
+                                                const act = prevAir.actions[selectedActionId];
+                                                if (!act || !act.elements[currentFrame]) return prevAir;
+                                                const nextElements = [...act.elements];
+                                                const nextEl = { ...nextElements[currentFrame] };
+                                                delete nextEl.clsn1;
+                                                delete nextEl.clsn2;
+                                                nextElements[currentFrame] = nextEl;
+                                                const nextAir = { ...prevAir, actions: { ...prevAir.actions, [selectedActionId]: { ...act, elements: nextElements } } };
+                                                syncAirRawText(nextAir);
+                                                return nextAir;
+                                            });
+                                        }}
+                                        className="w-full py-1 bg-[#1e1e1e] hover:bg-[#2c2c2c] border border-[#3a3a3a] rounded text-[9px] text-gray-300 font-semibold"
+                                    >
+                                        Clear Frame Override (Use Action Default)
+                                    </button>
+                                )}
                                 <div className="grid grid-cols-2 gap-1.5 mt-1">
                                     <button 
                                         onClick={() => handleAddCollisionBox(2)}
@@ -3717,7 +4648,7 @@ export default function MugenStudio({
 
                                 <div className="max-h-56 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 text-[10px] mt-1 flex flex-col gap-2 font-mono">
                                     {/* Defensive Box rows */}
-                                    {airData.actions[selectedActionId].clsn2.map((box, idx) => {
+                                    {displayedClsn2.map((box, idx) => {
                                         const isSelected = selectedClsn?.type === 2 && selectedClsn?.id === box.id;
                                         const boxW = Math.abs(box.x2 - box.x1);
                                         const boxH = Math.abs(box.y2 - box.y1);
@@ -3844,7 +4775,7 @@ export default function MugenStudio({
                                     })}
 
                                     {/* Attack Box rows */}
-                                    {airData.actions[selectedActionId].clsn1.map((box, idx) => {
+                                    {displayedClsn1.map((box, idx) => {
                                         const isSelected = selectedClsn?.type === 1 && selectedClsn?.id === box.id;
                                         const boxW = Math.abs(box.x2 - box.x1);
                                         const boxH = Math.abs(box.y2 - box.y1);
@@ -3969,12 +4900,15 @@ export default function MugenStudio({
                                             </div>
                                         );
                                     })}
-                                    {airData.actions[selectedActionId].clsn1.length === 0 && airData.actions[selectedActionId].clsn2.length === 0 && (
-                                        <span className="text-gray-500 italic text-[9px] block text-center p-1">No custom boxes</span>
+                                    {displayedClsn1.length === 0 && displayedClsn2.length === 0 && (
+                                        <span className="text-gray-500 italic text-[9px] block text-center p-1">
+                                            {clsnScope === 'frame' ? 'Inheriting Action Defaults (add box to override this frame)' : 'No custom boxes'}
+                                        </span>
                                     )}
                                 </div>
                             </div>
-                        )}
+                            );
+                        })()}
                     </div>
                 )}
 
@@ -4002,36 +4936,7 @@ export default function MugenStudio({
                                 <div 
                                     key={idx} 
                                     onClick={() => {
-                                        const textarea = codeEditorTextareaRef.current;
-                                        if (!textarea) return;
-                                        const text = textarea.value;
-                                        const lines = text.split('\n');
-                                        const targetHeader = cleanGroup.toLowerCase();
-                                        let seen = 0;
-                                        let charOffset = 0;
-
-                                        for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-                                            const rawLine = lines[lineIdx];
-                                            const semiIdx = rawLine.indexOf(';');
-                                            const codePart = (semiIdx !== -1 ? rawLine.slice(0, semiIdx) : rawLine).trim();
-                                            const headerMatch = codePart.match(/^\[(.*)\]$/);
-                                            if (headerMatch && headerMatch[1].trim().toLowerCase() === targetHeader) {
-                                                seen++;
-                                                if (seen === targetOccurrence) {
-                                                    const bracketPos = rawLine.indexOf('[');
-                                                    const selStart = charOffset + (bracketPos !== -1 ? bracketPos : 0);
-                                                    const closeBracketPos = rawLine.indexOf(']', bracketPos !== -1 ? bracketPos : 0);
-                                                    const selEnd = closeBracketPos !== -1 ? charOffset + closeBracketPos + 1 : selStart + cleanGroup.length + 2;
-                                                    textarea.focus();
-                                                    textarea.setSelectionRange(selStart, selEnd);
-                                                    const computed = window.getComputedStyle(textarea);
-                                                    const lineHeight = parseFloat(computed.lineHeight) || 18;
-                                                    textarea.scrollTop = Math.max(0, (lineIdx - 3) * lineHeight);
-                                                    break;
-                                                }
-                                            }
-                                            charOffset += rawLine.length + 1;
-                                        }
+                                        codeEditorRef.current?.jumpToHeader(cleanGroup, targetOccurrence);
                                     }}
                                     className={`flex items-center justify-between gap-1.5 px-1.5 py-1 hover:bg-[#333333] cursor-pointer rounded-sm ${isStateBlock ? 'pl-4' : ''}`}
                                     title={isCommandBlock && cmdKeys ? `${displayGroup}: ${cmdKeys}` : displayGroup}
@@ -4282,6 +5187,13 @@ export default function MugenStudio({
                             <Eraser size={16} />
                         </button>
                         <button 
+                            onClick={() => setActiveTool('eyedropper')} 
+                            className={`p-1.5 rounded transition-colors ${activeTool === 'eyedropper' ? 'bg-cyan-600 shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
+                            title="Eyedropper Tool (I) - Pick Color Index"
+                        >
+                            <Pipette size={16} />
+                        </button>
+                        <button 
                             onClick={() => setActiveTool('select')} 
                             className={`p-1.5 rounded transition-colors ${activeTool === 'select' ? 'bg-blue-600 shadow-inner text-white' : 'text-gray-400 hover:bg-[#333]'}`}
                             title="Select Rectangle Area (Ctrl+C to Copy)"
@@ -4303,12 +5215,12 @@ export default function MugenStudio({
          )}
 
          {/* Center Render Area */}
-         <div ref={renderAreaRef} className={`flex-1 flex-col relative bg-[#333333] ${mobileTab === 'center' ? 'flex' : 'hidden md:flex'}`}>
+         <div ref={renderAreaRef} className={`flex-1 min-h-0 overflow-hidden flex-col relative bg-[#333333] ${mobileTab === 'center' ? 'flex' : 'hidden md:flex'}`}>
              {/* Text Editor Layout */}
              {(activeMode === 'Definitions' || activeMode === 'Commands' || activeMode === 'States') && (
-                  <div className="flex-1 bg-[#1e1e1e] flex flex-col font-mono text-[11px] overflow-hidden">
+                  <div className="flex-1 min-h-0 bg-[#1e1e1e] flex flex-col font-mono text-[11px] overflow-hidden">
                       {activeText !== null ? (
-                         <div className="flex flex-1 relative flex-col">
+                         <div className="flex flex-1 min-h-0 overflow-hidden relative flex-col">
                              <div className="bg-[#151515] flex items-center border-b border-[#2b2b2b] shrink-0">
                                   {activeMode === 'States' && (
                                     <div className="flex flex-1 overflow-x-auto scrollbar-hide">
@@ -4421,12 +5333,13 @@ export default function MugenStudio({
                                      <span className="text-blue-500">Dual Sync Form Mode</span>
                                   </div>
                              </div>
-                             <textarea 
-                                 ref={codeEditorTextareaRef}
-                                 className="w-full flex-1 bg-[#1e1e1e] text-[#d4d4d4] font-mono p-4 outline-none resize-none border-none whitespace-pre overflow-x-auto leading-relaxed"
+                             <MugenCodeEditor
+                                 ref={codeEditorRef}
                                  value={activeText || ''}
-                                 onChange={(e) => setActiveText?.(e.target.value)}
-                                 spellCheck="false"
+                                 onChange={(val) => setActiveText?.(val)}
+                                 mode={activeMode as 'Definitions' | 'Commands' | 'States'}
+                                 issues={issues}
+                                 fileId={activeMode === 'States' ? activeStFileId : activeMode === 'Commands' ? activeCmdFileId : 'def'}
                              />
                          </div>
                       ) : (
@@ -4453,41 +5366,11 @@ export default function MugenStudio({
                                       </span>
                                   </div>
                                   
-                                  {/* Simulated Waveform screen */}
-                                  <div className="h-28 bg-[#0d0d0d] rounded-lg border border-[#252525] relative overflow-hidden flex items-center justify-center">
-                                      {/* Glowing grid */}
-                                      <div className="absolute inset-0 opacity-10" style={{ backgroundImage: 'linear-gradient(#33b5e5 1px, transparent 1px), linear-gradient(90deg, #33b5e5 1px, transparent 1px)', backgroundSize: '10px 10px' }} />
-                                      
-                                      {/* Dynamic sine/wave display */}
-                                      <div className="absolute inset-0 flex items-center justify-center">
-                                          <svg className="w-full h-16 stroke-blue-400 opacity-80" viewBox="0 0 400 100" preserveAspectRatio="none">
-                                              <path 
-                                                  d={Array.from({ length: 40 }).map((_, i) => {
-                                                      const x = (i / 39) * 400;
-                                                      let y = 50;
-                                                      if (playingSoundId === activeSound.id) {
-                                                          y = 50 + 35 * Math.sin(i * 0.8) * Math.sin(Date.now() / 150 + i * 0.2);
-                                                      } else {
-                                                          y = 50 + 8 * Math.sin(i * 0.4);
-                                                      }
-                                                      return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
-                                                  }).join(' ')} 
-                                                  fill="transparent" 
-                                                  strokeWidth="2" 
-                                                  strokeLinecap="round"
-                                              />
-                                          </svg>
-                                      </div>
-                                      
-                                      {/* LED labels */}
-                                      <div className="absolute top-2 left-3 font-mono text-[8px] text-emerald-500/70 flex gap-2">
-                                          <span>CH 1: ACTIVE</span>
-                                          <span>PEAK: -3.5dB</span>
-                                      </div>
-                                      <div className="absolute bottom-2 right-3 font-mono text-[8px] text-blue-500/70">
-                                          11.025 KHz 8-bit Mono
-                                      </div>
-                                  </div>
+                                  {/* Real Decoded Audio Waveform Visualizer */}
+                                  <SoundWaveform
+                                      sound={activeSound}
+                                      isPlaying={playingSoundId === activeSound.id}
+                                  />
                               </div>
 
                               {/* Primary Metadata Controller (Break & Group Sound) */}
@@ -4882,11 +5765,12 @@ export default function MugenStudio({
                             <AnimationStage 
                                 sff={sffData} 
                                 act={(sffData.palettes && sffData.palettes[selectedPaletteIdx]) ? sffData.palettes[selectedPaletteIdx].data : (sffData.palettes && sffData.palettes[0]) ? sffData.palettes[0].data : actPalette} 
-                                action={selectedActionId !== null ? airData?.actions[selectedActionId] : null}
+                                action={selectedActionId !== null ? airData?.actions[selectedActionId] : null} 
                                 frameIndex={currentFrame}
                                 zoom={zoom}
                                 showClsn={showClsn}
                                 showAxis={showAxis}
+                                showOnionSkin={showOnionSkin}
                                 pan={pan}
                                 previewOffset={previewOffset}
                                 activeTool={activeTool}
@@ -4904,6 +5788,15 @@ export default function MugenStudio({
                         <button onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(10, z + 0.5)); }} title="Zoom In" className="w-7 h-7 bg-[#3a3a3a] border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded text-gray-300 shadow-lg cursor-pointer"><ZoomIn size={14} /></button>
                         <button onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(0.25, z - 0.5)); }} title="Zoom Out" className="w-7 h-7 bg-[#3a3a3a] border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded text-gray-300 shadow-lg cursor-pointer"><ZoomOut size={14} /></button>
                         <button onClick={(e) => { e.stopPropagation(); setShowAxis(a => !a); }} title="Toggle Axis Grid" className={`w-7 h-7 border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded shadow-lg cursor-pointer ${showAxis ? 'bg-blue-600 text-white' : 'bg-[#3a3a3a] text-gray-300'}`}><Plus size={14} /></button>
+                        {activeMode === 'Animations' && (
+                            <button
+                                onClick={(e) => { e.stopPropagation(); setShowOnionSkin(o => !o); }}
+                                title="Toggle Onion Skinning (Previous Frame Ghost)"
+                                className={`w-7 h-7 border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded shadow-lg cursor-pointer ${showOnionSkin ? 'bg-amber-600 text-white' : 'bg-[#3a3a3a] text-gray-300'}`}
+                            >
+                                <Layers size={14} />
+                            </button>
+                        )}
                     </div>
                 </div>
             )}
@@ -5002,9 +5895,12 @@ export default function MugenStudio({
                                     <div className="flex-1 flex gap-2 overflow-x-auto overflow-y-hidden py-1 items-center px-1 select-none scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
                                         {elements.map((elem, idx) => {
                                             const isActive = idx === currentFrame;
+                                            const isLoopStart = action && action.loopstartIndex === idx;
                                             const duration = elem.time;
-                                            const hasClsn1 = action && action.clsn1 && action.clsn1.length > 0;
-                                            const hasClsn2 = action && action.clsn2 && action.clsn2.length > 0;
+                                            const effClsn1 = elem.clsn1 ?? action?.clsn1 ?? [];
+                                            const effClsn2 = elem.clsn2 ?? action?.clsn2 ?? [];
+                                            const hasClsn1 = effClsn1.length > 0;
+                                            const hasClsn2 = effClsn2.length > 0;
                                             
                                             return (
                                                 <div 
@@ -5012,8 +5908,11 @@ export default function MugenStudio({
                                                     onClick={() => { setIsPlaying(false); setCurrentFrame(idx); }}
                                                     className={`w-24 flex-shrink-0 cursor-pointer p-1.5 rounded border text-left flex flex-col justify-between h-[56px] transition-all select-none ${isActive ? 'bg-blue-950/40 border-blue-500 text-white shadow font-bold' : 'bg-[#121212] border-[#2c2c2c] text-zinc-400 hover:border-zinc-500'}`}
                                                 >
-                                                    <div className="flex justify-between items-center text-[9px]">
+                                                    <div className="flex justify-between items-center text-[9px] gap-1">
                                                         <span className={isActive ? "text-blue-300 font-bold" : "text-zinc-500"}>#{idx + 1}</span>
+                                                        {isLoopStart && (
+                                                            <span className="text-[7px] font-bold px-1 rounded bg-emerald-700/80 text-white" title="Loopstart Marker">LOOP</span>
+                                                        )}
                                                         <span className="font-mono text-[8px] bg-[#222] px-1 rounded border border-[#333]">S: {elem.group}, {elem.image}</span>
                                                     </div>
                                                     
@@ -5219,28 +6118,154 @@ export default function MugenStudio({
       </div>
 
       {/* Bottom Status / Issues Tab Panel */}
-      <div className="h-28 hidden md:flex bg-[#1e1e1e] border-t border-[#111111] flex-col">
-          <div className="flex bg-[#2a2a2a] border-b border-[#111111]">
-              <div className="px-5 py-1 text-gray-400 bg-[#1e1e1e] border-r border-[#111111] border-t-2 border-t-[#333333]">Editor</div>
-              <div className="px-5 py-1 text-gray-400 bg-[#2a2a2a] border-r border-[#111111] hover:bg-[#333] cursor-pointer">Project explorer</div>
+      <div className="h-32 hidden md:flex bg-[#1e1e1e] border-t border-[#111111] flex-col">
+          <div className="flex bg-[#2a2a2a] border-b border-[#111111] text-[11px] select-none">
+              <div className="px-4 py-1 text-gray-300 bg-[#1e1e1e] border-r border-[#111111] border-t-2 border-t-[#3b82f6] font-semibold">Diagnostics</div>
               <div className="flex-1" />
-              <div className="flex items-center gap-1 bg-[#1e1e1e] px-4 py-1 border-x border-[#111111] cursor-pointer hover:bg-[#252525]">
-                  <AlertCircle size={12} color="#ef4444" />
-                  <span className="text-gray-300">Issues</span>
-              </div>
-              <div className="px-4 py-1 text-gray-400 hover:bg-[#333] bg-[#2a2a2a] border-r border-[#111111] cursor-pointer">Advanced Search</div>
-              <div className="px-4 py-1 text-gray-400 hover:bg-[#333] bg-[#2a2a2a] border-r border-[#111111] cursor-pointer">Engine Output</div>
-              <div className="px-4 py-1 text-gray-400 hover:bg-[#333] bg-[#2a2a2a] border-r border-[#111111] cursor-pointer">Debugger</div>
-              <div className="px-4 py-1 text-gray-400 hover:bg-[#333] bg-[#2a2a2a] border-r border-[#111111] cursor-pointer">Watch</div>
+              <button
+                  type="button"
+                  onClick={() => setActiveBottomTab('issues')}
+                  className={`flex items-center gap-1.5 px-4 py-1 border-x border-[#111111] cursor-pointer transition-colors ${activeBottomTab === 'issues' ? 'bg-[#1e1e1e] text-white font-semibold' : 'bg-[#2a2a2a] text-gray-400 hover:bg-[#333]'}`}
+              >
+                  {issues.some(i => i.severity === 'error') ? (
+                      <AlertCircle size={12} className="text-red-400" />
+                  ) : issues.length > 0 ? (
+                      <AlertTriangle size={12} className="text-amber-400" />
+                  ) : (
+                      <CheckCircle2 size={12} className="text-emerald-400" />
+                  )}
+                  <span>Issues ({issues.length})</span>
+              </button>
+              <button
+                  type="button"
+                  onClick={() => setActiveBottomTab('search')}
+                  className={`px-4 py-1 border-r border-[#111111] cursor-pointer transition-colors ${activeBottomTab === 'search' ? 'bg-[#1e1e1e] text-white font-semibold' : 'bg-[#2a2a2a] text-gray-400 hover:bg-[#333]'}`}
+              >
+                  Advanced Search
+              </button>
+              <button
+                  type="button"
+                  onClick={() => setActiveBottomTab('output')}
+                  className={`px-4 py-1 border-r border-[#111111] cursor-pointer transition-colors ${activeBottomTab === 'output' ? 'bg-[#1e1e1e] text-white font-semibold' : 'bg-[#2a2a2a] text-gray-400 hover:bg-[#333]'}`}
+              >
+                  Engine Output ({engineLogs.length})
+              </button>
           </div>
-          <div className="flex-1 p-2 overflow-auto text-gray-400 text-xs">
-              0 issues found.
+
+          <div className="flex-1 p-1.5 overflow-y-auto text-gray-300 text-xs bg-[#18181b]">
+              {activeBottomTab === 'issues' && (
+                  issues.length === 0 ? (
+                      <div className="h-full flex items-center gap-2 px-3 text-emerald-400/90 text-[11px]">
+                          <CheckCircle2 size={13} />
+                          <span>0 issues found. All states, commands, and AIR sprite references are valid.</span>
+                      </div>
+                  ) : (
+                      <div className="flex flex-col gap-1">
+                          {issues.map(issue => (
+                              <button
+                                  key={issue.id}
+                                  type="button"
+                                  onClick={() => {
+                                      if (issue.source === 'AIR' && issue.actionId !== undefined) {
+                                          setActiveMode('Animations');
+                                          setSelectedActionId(issue.actionId);
+                                          setCurrentFrame(issue.frameIndex ?? 0);
+                                      } else if (issue.source === 'CNS') {
+                                          pendingCodeJumpRef.current = {
+                                              mode: 'States',
+                                              fileId: issue.fileId,
+                                              line: issue.line || 1,
+                                          };
+                                          setActiveMode('States');
+                                          if (issue.fileId) setActiveStFileId(issue.fileId);
+                                      } else if (issue.source === 'CMD') {
+                                          pendingCodeJumpRef.current = {
+                                              mode: 'Commands',
+                                              fileId: issue.fileId,
+                                              line: issue.line || 1,
+                                          };
+                                          setActiveMode('Commands');
+                                          if (issue.fileId) setActiveCmdFileId(issue.fileId);
+                                      } else if (issue.source === 'DEF') {
+                                          pendingCodeJumpRef.current = {
+                                              mode: 'Definitions',
+                                              line: issue.line || 1,
+                                          };
+                                          setActiveMode('Definitions');
+                                      }
+                                  }}
+                                  className="w-full text-left flex items-center gap-2 px-2 py-1 rounded hover:bg-white/5 transition-colors cursor-pointer"
+                              >
+                                  <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded uppercase shrink-0 ${
+                                      issue.severity === 'error'
+                                          ? 'bg-red-950 text-red-300 border border-red-700/60'
+                                          : issue.severity === 'warning'
+                                              ? 'bg-amber-950 text-amber-300 border border-amber-700/60'
+                                              : 'bg-blue-950 text-blue-300 border border-blue-700/60'
+                                  }`}>
+                                      {issue.severity}
+                                  </span>
+                                  <span className="text-[10px] font-mono text-zinc-400 shrink-0">
+                                      [{issue.source}{issue.fileName ? `:${issue.fileName}` : ''}{issue.line ? `:${issue.line}` : ''}]
+                                  </span>
+                                  <span className="text-[11px] text-zinc-200 truncate">{issue.message}</span>
+                              </button>
+                          ))}
+                      </div>
+                  )
+              )}
+
+              {activeBottomTab === 'search' && (
+                  <div className="flex flex-col gap-1.5 h-full">
+                      <div className="flex items-center gap-2 px-1">
+                          <Search size={12} className="text-zinc-500" />
+                          <input
+                              type="text"
+                              value={searchQuery}
+                              onChange={e => setSearchQuery(e.target.value)}
+                              placeholder="Quick filter across States, Commands, Definitions, Sprites, Animations, Sounds..."
+                              className="flex-1 bg-[#121215] border border-[#2f2f35] rounded px-2 py-0.5 text-[11px] text-zinc-200 outline-none focus:border-blue-500"
+                          />
+                      </div>
+                      <div className="flex-1 overflow-y-auto flex flex-col gap-0.5">
+                          {searchResults.slice(0, 15).map((res, idx) => (
+                              <button
+                                  key={idx}
+                                  type="button"
+                                  onClick={res.action}
+                                  className="w-full text-left flex items-center justify-between px-2 py-0.5 rounded hover:bg-blue-600/20 text-[11px]"
+                              >
+                                  <span className="truncate text-zinc-200">
+                                      <span className="text-[9px] font-mono text-blue-400 mr-2">[{res.type}]</span>
+                                      {res.title}
+                                  </span>
+                                  <span className="text-[10px] text-zinc-500 font-mono shrink-0">{res.subtitle}</span>
+                              </button>
+                          ))}
+                          {searchQuery.trim() && searchResults.length === 0 && (
+                              <span className="text-[10px] text-zinc-500 italic px-2">No matches found.</span>
+                          )}
+                      </div>
+                  </div>
+              )}
+
+              {activeBottomTab === 'output' && (
+                  engineLogs.length === 0 ? (
+                      <div className="text-[11px] text-zinc-500 italic px-2 py-1">No engine operations logged yet.</div>
+                  ) : (
+                      <div className="flex flex-col gap-0.5 font-mono text-[10px] text-zinc-300 px-1">
+                          {engineLogs.map((log, idx) => (
+                              <div key={idx} className="truncate">{log}</div>
+                          ))}
+                      </div>
+                  )
+              )}
           </div>
           {/* Status Bar */}
           <div className="h-6 bg-[#2a2a2a] border-t border-[#111111] flex items-center px-2 text-[10px] text-gray-500 justify-between">
-              <div>Position: 0, 0</div>
+              <div>Tool: {activeTool.toUpperCase()}</div>
               <div>Project: {getIniField(iniData, 'Info', 'name') || 'Character, Unknown / not set'}</div>
-              <div>Zoom: {zoom * 100}% | Hover to see coordinates</div>
+              <div>Zoom: {zoom * 100}% | Pan: {Math.round(pan.x)}, {Math.round(pan.y)}</div>
           </div>
       </div>
 
@@ -5449,6 +6474,24 @@ export default function MugenStudio({
             </div>
         </div>
       )}
+
+      {/* Mini Playable Move Tester Modal */}
+      <MoveTesterModal
+        isOpen={showMoveTester}
+        onClose={() => setShowMoveTester(false)}
+        sffData={sffData}
+        airData={airData}
+        actPalette={
+          sffData?.palettes?.[selectedPaletteIdx]?.data ||
+          sffData?.palettes?.[0]?.data ||
+          actPalette
+        }
+        selectedPaletteIdx={selectedPaletteIdx}
+        characterName={getIniField(iniData, 'Info', 'displayname') || getIniField(iniData, 'Info', 'name') || 'Character'}
+        cmdFiles={cmdFiles}
+        stFiles={stFiles}
+        sndData={sndData}
+      />
 
       {/* Save Notification Toast */}
       {saveNotification && (
@@ -5733,7 +6776,7 @@ function SpriteThumbnail({ sprite, palette }: { sprite: any; palette: Uint8Array
   );
 }
 
-function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis, pan, previewOffset, activeTool, selectedClsn, setSelectedClsn, onUpdateBox }: { 
+function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis, showOnionSkin = false, pan, previewOffset, activeTool, selectedClsn, setSelectedClsn, onUpdateBox }: { 
     sff: SffData, 
     act: Uint8Array | null, 
     action: any | null, 
@@ -5741,6 +6784,7 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
     zoom: number, 
     showClsn: boolean, 
     showAxis: boolean, 
+    showOnionSkin?: boolean,
     pan?: {x: number, y: number}, 
     previewOffset?: {x: number, y: number} | null,
     activeTool: string,
@@ -5782,6 +6826,35 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
             }
 
             if (action && action.elements[frameIndex]) {
+                // Onion skin: render previous frame sprite ghost underneath
+                if (showOnionSkin && frameIndex > 0 && action.elements[frameIndex - 1]) {
+                    const prevEl = action.elements[frameIndex - 1];
+                    const prevSprite = sff.images.find(i => i.group === prevEl.group && i.image === prevEl.image);
+                    if (prevSprite) {
+                        const prevPal = act || prevSprite.palette;
+                        if (prevPal) {
+                            try {
+                                const prevOff = getCachedSpriteCanvas(prevSprite, prevPal);
+                                const prevFlip = (prevEl.flip || "").toUpperCase();
+                                ctx.save();
+                                ctx.globalAlpha = 0.28;
+                                ctx.translate(centerX + panX, centerY + panY);
+                                if (prevFlip.includes('H')) ctx.scale(-1, 1);
+                                if (prevFlip.includes('V')) ctx.scale(1, -1);
+                                ctx.imageSmoothingEnabled = false;
+                                ctx.drawImage(
+                                    prevOff,
+                                    (prevEl.xOffset - prevSprite.xOffset) * zoom,
+                                    (prevEl.yOffset - prevSprite.yOffset) * zoom,
+                                    prevSprite.width * zoom,
+                                    prevSprite.height * zoom
+                                );
+                                ctx.restore();
+                            } catch {}
+                        }
+                    }
+                }
+
                 const element = action.elements[frameIndex];
                 const sprite = sff.images.find(i => i.group === element.group && i.image === element.image);
                 
@@ -5797,8 +6870,16 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
                             const flip = (element.flip || "").toUpperCase();
                             const flipH = flip.includes('H');
                             const flipV = flip.includes('V');
+                            const colorMode = (element.color || "").toUpperCase();
 
                             ctx.save();
+                            if (colorMode === 'A' || colorMode === 'A1') {
+                                ctx.globalAlpha = colorMode === 'A1' ? 0.55 : 0.78;
+                                ctx.globalCompositeOperation = 'lighter';
+                            } else if (colorMode === 'S') {
+                                ctx.globalAlpha = 0.65;
+                                ctx.globalCompositeOperation = 'difference';
+                            }
                             ctx.translate(centerX + panX, centerY + panY);
                             if (flipH) ctx.scale(-1, 1);
                             if (flipV) ctx.scale(1, -1);
@@ -5909,8 +6990,10 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
                         }
                     };
 
-                    action.clsn2.forEach((box: any) => drawBox(box, 2));
-                    action.clsn1.forEach((box: any) => drawBox(box, 1));
+                    const activeClsn2 = element.clsn2 ?? action.clsn2;
+                    const activeClsn1 = element.clsn1 ?? action.clsn1;
+                    activeClsn2.forEach((box: any) => drawBox(box, 2));
+                    activeClsn1.forEach((box: any) => drawBox(box, 1));
                     ctx.restore();
                 }
             }
@@ -5921,7 +7004,7 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
         const handleResize = () => { resize(); render(); };
         window.addEventListener('resize', handleResize);
         return () => window.removeEventListener('resize', handleResize);
-    }, [sff, act, action, frameIndex, zoom, showClsn, showAxis, pan, previewOffset, selectedClsn, activeTool]);
+    }, [sff, act, action, frameIndex, zoom, showClsn, showAxis, showOnionSkin, pan, previewOffset, selectedClsn, activeTool]);
 
     const getWorkspaceCoords = (clientX: number, clientY: number) => {
         if (!canvasRef.current || !action) return null;
@@ -5993,7 +7076,10 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
             return null;
         };
 
-        return checkBoxes(action.clsn1, 1) || checkBoxes(action.clsn2, 2);
+        const el = action.elements[frameIndex];
+        const activeClsn1 = el?.clsn1 ?? action.clsn1;
+        const activeClsn2 = el?.clsn2 ?? action.clsn2;
+        return checkBoxes(activeClsn1, 1) || checkBoxes(activeClsn2, 2);
     };
 
     const startDrag = (clientX: number, clientY: number) => {

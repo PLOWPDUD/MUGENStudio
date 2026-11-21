@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Gamepad2, Eye, RotateCcw, Volume2, Search, Zap, Move, ArrowDown, CornerUpLeft, SlidersHorizontal, Keyboard, Swords, Shield, Cpu, Trophy, ChevronDown, ChevronUp } from 'lucide-react';
 import { applyPalette } from '../lib/mugen/actParser';
-import type { AirData, AirElement, ClsnBox, SffData } from '../lib/mugen/types';
+import type { AirData, AirElement, ClsnBox, SffData, SffImage } from '../lib/mugen/types';
 import type { SndData } from '../lib/mugen/sndParser';
 
 interface TextFileLike {
@@ -1584,8 +1584,21 @@ function formatKeyLabel(key: string): string {
 
 type StateFilterChip = 'all' | 'hyper' | 'movexy' | 'crouch_hop' | 'special' | 'normal';
 type TesterMode = 'practice' | 'fight';
+type TeamSize = 1 | 2 | 3 | 4;
 type AiDifficulty = 'dummy' | 'normal' | 'hard';
 type FightOutcome = 'P1_WIN' | 'P2_WIN' | 'DRAW' | null;
+
+interface FightMemberHud {
+  id: string;
+  slotIdx: number;
+  life: number;
+  trail: number;
+  maxLife: number;
+  power: number;
+  maxPower: number;
+  stateNo: number;
+  comboCount: number;
+}
 
 interface HitSparkEffect {
   x: number;
@@ -1597,7 +1610,10 @@ interface HitSparkEffect {
 }
 
 interface FighterRuntime {
-  id: 'p1' | 'p2';
+  id: string;
+  team: 1 | 2;
+  slotIdx: number;
+  isPlayer: boolean;
   posX: number;
   posY: number; // 270 = ground, < 270 = air
   velX: number;
@@ -1629,6 +1645,7 @@ interface FighterRuntime {
   activeHitDef: ParsedHitDef | null;
   lastHitDefCtrlKey: string;
   hitScoredThisWindow: boolean;
+  hitTargetsThisWindow: Set<string>;
   moveContact: number;
   moveHit: number;
   moveGuarded: number;
@@ -1645,14 +1662,24 @@ interface FighterRuntime {
 }
 
 function createFighterRuntime(
-  id: 'p1' | 'p2',
+  id: string,
+  team: 1 | 2,
+  slotIdx: number,
+  teamSize: TeamSize,
   constants: CharacterPhysicsConstants,
   mode: TesterMode
 ): FighterRuntime {
-  const startX = mode === 'fight' ? (id === 'p1' ? -95 : 95) : 0;
-  const startFacing: 1 | -1 = id === 'p1' ? 1 : -1;
+  let startX = 0;
+  if (mode === 'fight') {
+    const baseOffset = teamSize === 1 ? 95 : 58 + slotIdx * 38;
+    startX = team === 1 ? -baseOffset : baseOffset;
+  }
+  const startFacing: 1 | -1 = team === 1 ? 1 : -1;
   return {
     id,
+    team,
+    slotIdx,
+    isPlayer: team === 1 && slotIdx === 0,
     posX: startX,
     posY: 270,
     velX: 0,
@@ -1684,6 +1711,7 @@ function createFighterRuntime(
     activeHitDef: null,
     lastHitDefCtrlKey: '',
     hitScoredThisWindow: false,
+    hitTargetsThisWindow: new Set<string>(),
     moveContact: 0,
     moveHit: 0,
     moveGuarded: 0,
@@ -1691,12 +1719,26 @@ function createFighterRuntime(
     heldDirs: new Set<string>(),
     crouchLocked: false,
     runLocked: false,
-    aiActionTimer: 18,
-    aiCooldown: 18,
+    aiActionTimer: 12 + slotIdx * 8,
+    aiCooldown: 14 + slotIdx * 10,
     aiWalkDir: 0,
     aiHoldDown: false,
     aiBlockTimer: 0,
   };
+}
+
+function getNearestLivingOpponent(f: FighterRuntime, oppTeam: FighterRuntime[]): FighterRuntime {
+  let best: FighterRuntime | null = null;
+  let bestDist = Infinity;
+  for (const cand of oppTeam) {
+    if (cand.life <= 0) continue;
+    const d = Math.abs(cand.posX - f.posX);
+    if (d < bestDist) {
+      bestDist = d;
+      best = cand;
+    }
+  }
+  return best || oppTeam[0];
 }
 
 function toWorldBox(b: ClsnBox, f: FighterRuntime) {
@@ -1789,6 +1831,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
   const [showCustomize, setShowCustomize] = useState(false);
   const [listeningSlotId, setListeningSlotId] = useState<string | null>(null);
   const [mode, setMode] = useState<TesterMode>('practice');
+  const [teamSize, setTeamSize] = useState<TeamSize>(1);
   const [aiDifficulty, setAiDifficulty] = useState<AiDifficulty>('normal');
   const [fightOutcome, setFightOutcome] = useState<FightOutcome>(null);
   const [fightBanner, setFightBanner] = useState<string | null>(null);
@@ -1851,7 +1894,134 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     return p1Palette;
   }, [sffData, p2PaletteIdx, differentPaletteIndices, p1Palette]);
 
-  const [fightHud, setFightHud] = useState(() => ({
+  const { team1Palettes, team2Palettes } = useMemo(() => {
+    const pals = sffData?.palettes || [];
+    const altPool = differentPaletteIndices.length > 0 ? differentPaletteIndices : pals.map((_, i) => i);
+    const t1: (Uint8Array | null)[] = [];
+    const t2: (Uint8Array | null)[] = [];
+
+    for (let slot = 0; slot < 4; slot++) {
+      if (slot === 0) {
+        t1.push(p1Palette);
+        t2.push(p2Palette);
+      } else {
+        if (pals.length > 2 && altPool.length > 1) {
+          const p2Pos = altPool.indexOf(p2PaletteIdx);
+          const t2Idx = altPool[( (p2Pos >= 0 ? p2Pos : 0) + slot ) % altPool.length];
+          t2.push(pals[t2Idx]?.data || p2Palette);
+          const t1Cand = pals.findIndex((p, idx) => idx !== p2PaletteIdx && !palettesAreSame(p.data, p2Palette) && (slot === 1 ? !palettesAreSame(p.data, p1Palette) : true));
+          if (t1Cand >= 0 && slot === 1) {
+            t1.push(pals[t1Cand].data);
+          } else {
+            const safePool = altPool.filter(idx => idx !== p2PaletteIdx);
+            const t1Idx = safePool.length > 0 ? safePool[slot % safePool.length] : 0;
+            t1.push(pals[t1Idx]?.data || p1Palette);
+          }
+        } else {
+          // 1 or 2 palettes: keep Team 1 matching P1's color and Team 2 matching P2's color for clear team ID
+          t1.push(p1Palette);
+          t2.push(p2Palette);
+        }
+      }
+    }
+    return { team1Palettes: t1, team2Palettes: t2 };
+  }, [sffData, p1Palette, p2Palette, p2PaletteIdx, differentPaletteIndices]);
+
+  const { team1PortraitUrls, team2PortraitUrls } = useMemo(() => {
+    const renderPortraitDataUrl = (sprite: SffImage | undefined, pal: Uint8Array | null | undefined): string | null => {
+      if (typeof document === 'undefined') return null;
+      if (!sprite || !sprite.pixelIndices || sprite.width <= 0 || sprite.height <= 0 || !pal) return null;
+      try {
+        const imgData = applyPalette(sprite.pixelIndices, sprite.width, sprite.height, pal);
+        const off = document.createElement('canvas');
+        off.width = sprite.width;
+        off.height = sprite.height;
+        const octx = off.getContext('2d');
+        if (!octx) return null;
+        octx.putImageData(imgData, 0, 0);
+        return off.toDataURL('image/png');
+      } catch {
+        return null;
+      }
+    };
+
+    const empty = [null, null, null, null] as (string | null)[];
+    if (!sffData || sffData.images.length === 0) {
+      return { team1PortraitUrls: empty, team2PortraitUrls: empty };
+    }
+
+    const iconSprite =
+      sffData.images.find(img => img.group === 9000 && img.image === 0 && img.pixelIndices?.length > 0 && img.width > 0 && img.height > 0) ||
+      sffData.images.find(img => img.group === 9000 && img.image === 1 && img.pixelIndices?.length > 0 && img.width > 0 && img.height > 0) ||
+      sffData.images.find(img => img.group === 0 && img.image === 0 && img.pixelIndices?.length > 0 && img.width > 0 && img.height > 0);
+
+    if (!iconSprite) {
+      return { team1PortraitUrls: empty, team2PortraitUrls: empty };
+    }
+
+    const mainPal = sffData.palettes?.[0]?.data || actPalette || null;
+    const hasDedicatedPortraitPalette = Boolean(
+      iconSprite.palette &&
+      mainPal &&
+      !palettesAreSame(iconSprite.palette, mainPal) &&
+      (iconSprite.isSharedPalette === false || sffData.isV2)
+    );
+
+    const cache = new Map<Uint8Array, string | null>();
+    const urlForPal = (targetPal: Uint8Array | null | undefined): string | null => {
+      const resolved = hasDedicatedPortraitPalette
+        ? iconSprite.palette
+        : (targetPal || iconSprite.palette || sffData.palettes?.[0]?.data);
+      if (!resolved) return null;
+      for (const [k, v] of cache.entries()) {
+        if (palettesAreSame(k, resolved)) return v;
+      }
+      const rendered = renderPortraitDataUrl(iconSprite, resolved);
+      cache.set(resolved, rendered);
+      return rendered;
+    };
+
+    return {
+      team1PortraitUrls: team1Palettes.map(p => urlForPal(p)),
+      team2PortraitUrls: team2Palettes.map(p => urlForPal(p)),
+    };
+  }, [sffData, actPalette, team1Palettes, team2Palettes]);
+
+  const makeMemberHud = (f: FighterRuntime): FightMemberHud => ({
+    id: f.id,
+    slotIdx: f.slotIdx,
+    life: Math.ceil(f.life),
+    trail: Math.ceil(f.trailLife),
+    maxLife: f.maxLife,
+    power: Math.floor(f.power),
+    maxPower: f.maxPower,
+    stateNo: f.stateNo,
+    comboCount: f.comboCount,
+  });
+
+  const [fightHud, setFightHud] = useState<{
+    team1: FightMemberHud[];
+    team2: FightMemberHud[];
+    p1Life: number;
+    p1Trail: number;
+    p1MaxLife: number;
+    p1Power: number;
+    p1MaxPower: number;
+    p1Combo: number;
+    p2Life: number;
+    p2Trail: number;
+    p2MaxLife: number;
+    p2Power: number;
+    p2MaxPower: number;
+    p2Combo: number;
+    p2StateNo: number;
+  }>(() => ({
+    team1: [
+      { id: 'p1', slotIdx: 0, life: constants.life, trail: constants.life, maxLife: constants.life, power: 0, maxPower: constants.power, stateNo: 0, comboCount: 0 },
+    ],
+    team2: [
+      { id: 'p2', slotIdx: 0, life: constants.life, trail: constants.life, maxLife: constants.life, power: 0, maxPower: constants.power, stateNo: 0, comboCount: 0 },
+    ],
     p1Life: constants.life,
     p1Trail: constants.life,
     p1MaxLife: constants.life,
@@ -1931,10 +2101,13 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
   const [stateSearch, setStateSearch] = useState('');
   const [stateFilter, setStateFilter] = useState<StateFilterChip>('all');
 
-  const p1Ref = useRef<FighterRuntime>(createFighterRuntime('p1', constants, 'practice'));
-  const p2Ref = useRef<FighterRuntime>(createFighterRuntime('p2', constants, 'fight'));
+  const team1Ref = useRef<FighterRuntime[]>([createFighterRuntime('p1', 1, 0, 1, constants, 'practice')]);
+  const team2Ref = useRef<FighterRuntime[]>([createFighterRuntime('p2', 2, 0, 1, constants, 'fight')]);
+  const p1Ref = useRef<FighterRuntime>(team1Ref.current[0]);
+  const p2Ref = useRef<FighterRuntime>(team2Ref.current[0]);
   const cameraXRef = useRef(0);
   const modeRef = useRef<TesterMode>('practice');
+  const teamSizeRef = useRef<TeamSize>(1);
   const aiDifficultyRef = useRef<AiDifficulty>('normal');
   const fightOutcomeRef = useRef<FightOutcome>(null);
   const sparksRef = useRef<HitSparkEffect[]>([]);
@@ -1944,7 +2117,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
   const lastChordUpgradeRef = useRef<{ time: number; stance: 'S' | 'C' | 'A' } | null>(null);
   const superPauseTicksRef = useRef(0);
   const superMoveTimeRef = useRef(0);
-  const superCasterRef = useRef<'p1' | 'p2' | null>(null);
+  const superCasterRef = useRef<string | null>(null);
   const lastDirTapRef = useRef<{ dir: string; time: number } | null>(null);
   const inputLogRef = useRef<string[]>([]);
   const audioPoolRef = useRef<HTMLAudioElement[]>([]);
@@ -1967,6 +2140,10 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
+
+  useEffect(() => {
+    teamSizeRef.current = teamSize;
+  }, [teamSize]);
 
   useEffect(() => {
     aiDifficultyRef.current = aiDifficulty;
@@ -2119,6 +2296,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     f.activeHitDef = null;
     f.lastHitDefCtrlKey = '';
     f.hitScoredThisWindow = false;
+    f.hitTargetsThisWindow = new Set();
     f.moveContact = 0;
     f.moveHit = 0;
     f.moveGuarded = 0;
@@ -2256,9 +2434,18 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     transitionFighterState(p1, targetState, { label });
   };
 
-  const resetArena = (nextMode: TesterMode = modeRef.current) => {
-    p1Ref.current = createFighterRuntime('p1', constants, nextMode);
-    p2Ref.current = createFighterRuntime('p2', constants, nextMode);
+  const resetArena = (nextMode: TesterMode = modeRef.current, nextSize: TeamSize = teamSizeRef.current) => {
+    const activeCount: TeamSize = nextMode === 'fight' ? nextSize : 1;
+    const t1: FighterRuntime[] = [];
+    const t2: FighterRuntime[] = [];
+    for (let i = 0; i < activeCount; i++) {
+      t1.push(createFighterRuntime(i === 0 ? 'p1' : `p1-ally-${i}`, 1, i, activeCount, constants, nextMode));
+      t2.push(createFighterRuntime(i === 0 ? 'p2' : `p2-cpu-${i}`, 2, i, activeCount, constants, 'fight'));
+    }
+    team1Ref.current = t1;
+    team2Ref.current = t2;
+    p1Ref.current = t1[0];
+    p2Ref.current = t2[0];
     cameraXRef.current = 0;
     fightOutcomeRef.current = null;
     sparksRef.current = [];
@@ -2271,7 +2458,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     lastChordUpgradeRef.current = null;
     inputLogRef.current = [];
     setFightOutcome(null);
-    setFightBanner(nextMode === 'fight' ? 'FIGHT!' : null);
+    setFightBanner(nextMode === 'fight' ? (activeCount > 1 ? `${activeCount}v${activeCount} FIGHT!` : 'FIGHT!') : null);
     setHeldDirs(new Set());
     setHeldAttackTokens(new Set());
     joystickPointerIdRef.current = null;
@@ -2283,11 +2470,13 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     setRunLocked(false);
     setMatchedMove(null);
     setIsHyperActive(false);
-    transitionFighterState(p1Ref.current, 0);
+    t1.forEach(f => transitionFighterState(f, 0));
     if (nextMode === 'fight') {
-      transitionFighterState(p2Ref.current, 0);
+      t2.forEach(f => transitionFighterState(f, 0));
     }
     setFightHud({
+      team1: t1.map(makeMemberHud),
+      team2: t2.map(makeMemberHud),
       p1Life: constants.life,
       p1Trail: constants.life,
       p1MaxLife: constants.life,
@@ -2407,8 +2596,8 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
   ): { matches: boolean; multiWeight: number } => {
     if (rule.requiresP2Close) {
       if (modeRef.current !== 'fight') return { matches: false, multiWeight: 0 };
-      const opp = f.id === 'p1' ? p2Ref.current : p1Ref.current;
-      if (Math.abs(f.posX - opp.posX) > 65) return { matches: false, multiWeight: 0 };
+      const opp = getNearestLivingOpponent(f, f.team === 1 ? team2Ref.current : team1Ref.current);
+      if (!opp || Math.abs(f.posX - opp.posX) > 65) return { matches: false, multiWeight: 0 };
     }
 
     if (modeRef.current === 'fight' && rule.minPowerRequired > 0 && f.power < rule.minPowerRequired) {
@@ -3287,6 +3476,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
               f.activeHitDef = ctrl.hitDef;
               f.lastHitDefCtrlKey = armKey;
               f.hitScoredThisWindow = false;
+              f.hitTargetsThisWindow = new Set();
             }
           } else if (ctrl.type === 'superpause') {
             const spKey = `sp-${ctrl.id}`;
@@ -3925,7 +4115,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
         }
       }
 
-      if (!hitDef || atk.hitScoredThisWindow) return;
+      if (!hitDef || atk.hitTargetsThisWindow.has(def.id)) return;
 
       // Check hitflag compatibility
       if (def.posY < 270 && !hitDef.hitFlag.includes('A')) return;
@@ -3935,6 +4125,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       if (!hitPoint) return;
 
       atk.hitScoredThisWindow = true;
+      atk.hitTargetsThisWindow.add(def.id);
       atk.moveContact = 1;
 
       const defDirs = getCharHeldDirs(def);
@@ -4092,6 +4283,26 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           ctx.restore();
         }
       }
+
+      // Draw role tag above fighters in 2v2 / 3v3 / 4v4 battles
+      if (modeRef.current === 'fight' && teamSizeRef.current > 1 && f.life > 0) {
+        const tagText = f.isPlayer
+          ? 'P1'
+          : f.team === 1
+            ? `ALLY ${f.slotIdx + 1}`
+            : aiDifficultyRef.current === 'dummy'
+              ? `DMY ${f.slotIdx + 1}`
+              : `CPU ${f.slotIdx + 1}`;
+        const tagY = Math.max(82, screenY - 92 * scale);
+        ctx.save();
+        ctx.font = 'bold 9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = 'rgba(0,0,0,0.85)';
+        ctx.fillText(tagText, screenX + 1, tagY + 1);
+        ctx.fillStyle = f.isPlayer ? '#34d399' : f.team === 1 ? '#2dd4bf' : '#38bdf8';
+        ctx.fillText(tagText, screenX, tagY);
+        ctx.restore();
+      }
     };
 
     const loop = (now: number) => {
@@ -4100,7 +4311,11 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
       while (acc >= stepMs) {
         acc -= stepMs;
-        const p1 = p1Ref.current;
+        const team1 = team1Ref.current;
+        const team2 = team2Ref.current;
+        const p1 = team1[0];
+        p1Ref.current = p1;
+        p2Ref.current = getNearestLivingOpponent(p1, team2);
         const p2 = p2Ref.current;
         const isFight = modeRef.current === 'fight';
 
@@ -4112,11 +4327,15 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           }
           if (superMoveTimeRef.current > 0) {
             superMoveTimeRef.current--;
-            const caster = superCasterRef.current === 'p2' ? p2 : p1;
-            const target = caster === p1 ? p2 : p1;
+            const allFighters = [...team1, ...team2];
+            const caster = allFighters.find(f => f.id === superCasterRef.current) || p1;
+            const oppTeam = caster.team === 1 ? team2 : team1;
+            const target = getNearestLivingOpponent(caster, oppTeam) || p2;
             stepFighter(caster, target);
             if (isFight) {
-              resolveHit(caster, target);
+              for (const def of oppTeam) {
+                if (def.life > 0) resolveHit(caster, def);
+              }
             }
             advanceFighterAnim(caster, target);
           } else {
@@ -4124,54 +4343,90 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           }
         } else {
           if (isFight) {
-            runAiDecision(p2, p1);
-            stepFighter(p1, p2);
-            stepFighter(p2, p1);
+            for (const f of team1) {
+              const opp = getNearestLivingOpponent(f, team2);
+              if (!f.isPlayer) runAiDecision(f, opp);
+              stepFighter(f, opp);
+            }
+            for (const f of team2) {
+              const opp = getNearestLivingOpponent(f, team1);
+              runAiDecision(f, opp);
+              stepFighter(f, opp);
+            }
 
-            // Body Pushbox separation (only when vertically close so jump-ins aren't pushed off prematurely)
-            if (p1.life > 0 && p2.life > 0 && Math.abs(p1.posY - p2.posY) < 48) {
-              const minSep = 32;
-              const dx = p2.posX - p1.posX;
-              if (Math.abs(dx) < minSep) {
-                const dir = dx >= 0 ? 1 : -1;
-                const push = (minSep - Math.abs(dx)) * 0.5;
-                p1.posX -= dir * push;
-                p2.posX += dir * push;
+            // Body Pushbox separation across opposing teams (only when vertically close)
+            for (const a of team1) {
+              if (a.life <= 0) continue;
+              for (const b of team2) {
+                if (b.life <= 0) continue;
+                if (Math.abs(a.posY - b.posY) < 48) {
+                  const minSep = 30;
+                  const dx = b.posX - a.posX;
+                  if (Math.abs(dx) < minSep) {
+                    const dir = dx >= 0 ? 1 : -1;
+                    const push = (minSep - Math.abs(dx)) * 0.5;
+                    a.posX -= dir * push;
+                    b.posX += dir * push;
+                  }
+                }
               }
             }
 
             // Stage & camera viewport clamping so fighters never leave the arena
             const stageLimit = 520;
-            p1.posX = Math.max(-stageLimit, Math.min(stageLimit, p1.posX));
-            p2.posX = Math.max(-stageLimit, Math.min(stageLimit, p2.posX));
-
-            const targetCam = Math.max(-330, Math.min(330, (p1.posX + p2.posX) / 2));
+            const allFighters = [...team1, ...team2];
+            const living = allFighters.filter(f => f.life > 0);
+            const camGroup = living.length > 0 ? living : allFighters;
+            for (const f of allFighters) {
+              f.posX = Math.max(-stageLimit, Math.min(stageLimit, f.posX));
+            }
+            const minCamX = Math.min(...camGroup.map(f => f.posX));
+            const maxCamX = Math.max(...camGroup.map(f => f.posX));
+            const targetCam = Math.max(-330, Math.min(330, (minCamX + maxCamX) / 2));
             cameraXRef.current += (targetCam - cameraXRef.current) * 0.2;
 
-            const screenHalfSpan = 185;
-            p1.posX = Math.max(cameraXRef.current - screenHalfSpan, Math.min(cameraXRef.current + screenHalfSpan, p1.posX));
-            p2.posX = Math.max(cameraXRef.current - screenHalfSpan, Math.min(cameraXRef.current + screenHalfSpan, p2.posX));
+            const screenHalfSpan = 190;
+            for (const f of allFighters) {
+              f.posX = Math.max(cameraXRef.current - screenHalfSpan, Math.min(cameraXRef.current + screenHalfSpan, f.posX));
+            }
 
             // Combat hit detection (Clsn1 vs Clsn2) BEFORE advancing animation ticks
-            resolveHit(p1, p2);
-            resolveHit(p2, p1);
+            for (const atk of team1) {
+              if (atk.life <= 0) continue;
+              for (const def of team2) {
+                if (def.life > 0) resolveHit(atk, def);
+              }
+            }
+            for (const atk of team2) {
+              if (atk.life <= 0) continue;
+              for (const def of team1) {
+                if (def.life > 0) resolveHit(atk, def);
+              }
+            }
 
-            // Check K.O. state
-            if (!fightOutcomeRef.current && (p1.life <= 0 || p2.life <= 0)) {
+            // Check Team K.O. state
+            const team1Alive = team1.some(f => f.life > 0);
+            const team2Alive = team2.some(f => f.life > 0);
+            if (!fightOutcomeRef.current && (!team1Alive || !team2Alive)) {
               const outcome: FightOutcome =
-                p1.life <= 0 && p2.life <= 0 ? 'DRAW' : p2.life <= 0 ? 'P1_WIN' : 'P2_WIN';
+                !team1Alive && !team2Alive ? 'DRAW' : !team2Alive ? 'P1_WIN' : 'P2_WIN';
               fightOutcomeRef.current = outcome;
               setFightOutcome(outcome);
-              if (outcome === 'P1_WIN' && p1.posY >= 270 && p1.ctrl === 1 && (airData?.actions[181] || airData?.actions[180])) {
-                transitionFighterState(p1, airData?.actions[181] ? 181 : 180);
-              } else if (outcome === 'P2_WIN' && p2.posY >= 270 && p2.ctrl === 1 && (airData?.actions[181] || airData?.actions[180])) {
-                transitionFighterState(p2, airData?.actions[181] ? 181 : 180);
+              const winners = outcome === 'P1_WIN' ? team1 : outcome === 'P2_WIN' ? team2 : [];
+              for (const w of winners) {
+                if (w.life > 0 && w.posY >= 270 && w.ctrl === 1 && (airData?.actions[181] || airData?.actions[180])) {
+                  transitionFighterState(w, airData?.actions[181] ? 181 : 180);
+                }
               }
             }
 
             // Advance animation frames & stateTime after hit resolution
-            advanceFighterAnim(p1, p2);
-            advanceFighterAnim(p2, p1);
+            for (const f of team1) {
+              advanceFighterAnim(f, getNearestLivingOpponent(f, team2));
+            }
+            for (const f of team2) {
+              advanceFighterAnim(f, getNearestLivingOpponent(f, team1));
+            }
           } else {
             stepFighter(p1, p2);
             const deadzone = 75;
@@ -4195,20 +4450,25 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
         if (hudFrameCounter % 3 === 0) {
           syncP1ReactHud();
           if (isFight) {
+            const leadP2 = p2Ref.current;
+            const team1Combo = Math.max(0, ...team2.map(f => f.comboCount));
+            const team2Combo = Math.max(0, ...team1.map(f => f.comboCount));
             setFightHud({
+              team1: team1.map(makeMemberHud),
+              team2: team2.map(makeMemberHud),
               p1Life: Math.ceil(p1.life),
               p1Trail: Math.ceil(p1.trailLife),
               p1MaxLife: p1.maxLife,
               p1Power: Math.floor(p1.power),
               p1MaxPower: p1.maxPower,
-              p1Combo: p2.comboCount,
-              p2Life: Math.ceil(p2.life),
-              p2Trail: Math.ceil(p2.trailLife),
-              p2MaxLife: p2.maxLife,
-              p2Power: Math.floor(p2.power),
-              p2MaxPower: p2.maxPower,
-              p2Combo: p1.comboCount,
-              p2StateNo: p2.stateNo,
+              p1Combo: team1Combo,
+              p2Life: Math.ceil(leadP2.life),
+              p2Trail: Math.ceil(leadP2.trailLife),
+              p2MaxLife: leadP2.maxLife,
+              p2Power: Math.floor(leadP2.power),
+              p2MaxPower: leadP2.maxPower,
+              p2Combo: team2Combo,
+              p2StateNo: leadP2.stateNo,
             });
           }
         }
@@ -4220,8 +4480,10 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       if (canvas && ctx) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        const p1 = p1Ref.current;
-        const p2 = p2Ref.current;
+        const team1 = team1Ref.current;
+        const team2 = team2Ref.current;
+        const p1 = team1[0];
+        const allFighters = [...team1, ...team2];
         const scale = 1.6;
         const hyperFlash = superPauseTicksRef.current > 0;
         const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
@@ -4233,7 +4495,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
         // Hyper SuperPause ring burst on caster
         if (hyperFlash) {
-          const caster = superCasterRef.current === 'p2' ? p2 : p1;
+          const caster = allFighters.find(f => f.id === superCasterRef.current) || p1;
           const sx = canvas.width / 2 + (caster.posX - cameraXRef.current) * scale;
           const sy = 270 + (caster.posY - 270) * scale;
           const prog = 1 - superPauseTicksRef.current / 30;
@@ -4275,14 +4537,16 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
         ctx.lineTo(canvas.width, 270);
         ctx.stroke();
 
-        // Draw Fighters (draw defender behind attacker so active moves pop cleanly)
+        // Draw Fighters (KO'd -> neutral -> attacking -> P1 in front)
         if (modeRef.current === 'fight') {
-          if (p2.moveType === 'A' && p1.moveType !== 'A') {
-            drawFighter(ctx, p1, cameraXRef.current, canvas.width, scale, p1Palette);
-            drawFighter(ctx, p2, cameraXRef.current, canvas.width, scale, p2Palette);
-          } else {
-            drawFighter(ctx, p2, cameraXRef.current, canvas.width, scale, p2Palette);
-            drawFighter(ctx, p1, cameraXRef.current, canvas.width, scale, p1Palette);
+          const drawOrder = [...allFighters].sort((a, b) => {
+            const za = (a.life <= 0 ? 0 : a.moveType === 'A' ? 2 : 1) + (a.isPlayer ? 0.5 : 0);
+            const zb = (b.life <= 0 ? 0 : b.moveType === 'A' ? 2 : 1) + (b.isPlayer ? 0.5 : 0);
+            return za - zb;
+          });
+          for (const f of drawOrder) {
+            const pal = f.team === 1 ? team1Palettes[f.slotIdx] ?? p1Palette : team2Palettes[f.slotIdx] ?? p2Palette;
+            drawFighter(ctx, f, cameraXRef.current, canvas.width, scale, pal);
           }
 
           // Render Hit / Guard Sparks
@@ -4325,7 +4589,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
     rafId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafId);
-  }, [isOpen, airData, sffData, p1Palette, p2Palette, showClsn, constants, states, rules, sortedStates]);
+  }, [isOpen, airData, sffData, p1Palette, p2Palette, team1Palettes, team2Palettes, showClsn, constants, states, rules, sortedStates]);
 
   const filteredStatedefs = useMemo(() => {
     const q = stateSearch.trim().toLowerCase();
@@ -4656,6 +4920,31 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
           {mode === 'fight' && (
             <>
+              {/* Team Size Selector: 1v1, 2v2, 3v3, 4v4 */}
+              <div
+                className="flex bg-[#1a1a21] p-0.5 rounded-lg border border-[#32323e]"
+                title="Battle format: 1v1 Solo or Simultaneous Team (2v2, 3v3, 4v4)"
+              >
+                {([1, 2, 3, 4] as TeamSize[]).map(sz => (
+                  <button
+                    key={sz}
+                    type="button"
+                    onClick={() => {
+                      if (teamSize !== sz) {
+                        setTeamSize(sz);
+                        teamSizeRef.current = sz;
+                        resetArena('fight', sz);
+                      }
+                    }}
+                    className={`px-1.5 py-1 rounded text-[10px] font-bold font-mono cursor-pointer transition-colors ${
+                      teamSize === sz ? 'bg-amber-500 text-black' : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {sz}v{sz}
+                  </button>
+                ))}
+              </div>
+
               <button
                 type="button"
                 onClick={() => {
@@ -4664,7 +4953,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
                   setAiDifficulty(next);
                 }}
                 className="px-2 py-1 rounded bg-[#24242b] hover:bg-[#30303a] border border-[#3a3a45] text-[10px] font-semibold text-amber-300 flex items-center gap-1 cursor-pointer"
-                title="Cycle P2 behavior: Dummy (stand/watch), Normal CPU, or Hard CPU"
+                title="Cycle AI behavior: Dummy (stand/watch), Normal CPU, or Hard CPU"
               >
                 <Cpu size={11} />
                 AI: {aiDifficulty === 'dummy' ? 'Dummy' : aiDifficulty === 'hard' ? 'Hard' : 'Normal'}
@@ -4918,77 +5207,227 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
         {mode === 'fight' ? (
           <>
             {/* M.U.G.E.N Top VS Health Bars & Infinite Timer */}
-            <div className="absolute top-2 inset-x-3 sm:inset-x-4 z-10 flex items-start justify-between gap-2 pointer-events-none">
-              {/* P1 Life */}
-              <div className="flex-1 flex flex-col gap-0.5 sm:gap-1">
-                <div className="flex items-center justify-between text-[9px] sm:text-[10px] font-bold px-1">
-                  <span className="text-white uppercase tracking-wider truncate drop-shadow">
-                    {characterName} <span className="text-emerald-400 font-mono">P1</span>
-                  </span>
-                  <span className="font-mono text-zinc-200 tabular-nums drop-shadow">
-                    {fightHud.p1Life}/{fightHud.p1MaxLife}
-                  </span>
-                </div>
-                <div className="relative h-3.5 sm:h-4 bg-[#171219]/90 border-2 border-zinc-300/70 rounded-sm overflow-hidden shadow-md flex justify-end">
+            <div className="absolute top-2 inset-x-2.5 sm:inset-x-4 z-10 flex items-start justify-between gap-1.5 sm:gap-2 pointer-events-none">
+              {/* Team 1 Portrait (9000,0) & Life (+ Allies in 2v2/3v3/4v4) */}
+              <div className="flex-1 min-w-0 flex flex-col gap-1">
+                <div className="flex items-start gap-1.5 sm:gap-2">
                   <div
-                    className="absolute inset-y-0 right-0 bg-rose-600/85 transition-[width] duration-150"
-                    style={{ width: `${Math.max(0, Math.min(100, (fightHud.p1Trail / Math.max(1, fightHud.p1MaxLife)) * 100))}%` }}
-                  />
-                  <div
-                    className={`relative h-full transition-[width] duration-75 ${
-                      fightHud.p1Life / Math.max(1, fightHud.p1MaxLife) > 0.5
-                        ? 'bg-gradient-to-l from-emerald-400 to-lime-400'
-                        : fightHud.p1Life / Math.max(1, fightHud.p1MaxLife) > 0.25
-                          ? 'bg-gradient-to-l from-amber-400 to-yellow-300'
-                          : 'bg-gradient-to-l from-red-500 to-orange-500'
+                    className={`w-9 h-9 sm:w-11 sm:h-11 shrink-0 rounded-sm bg-[#14111a]/95 border-2 border-emerald-400/80 shadow-md overflow-hidden flex items-center justify-center relative ${
+                      fightHud.p1Life <= 0 ? 'grayscale opacity-50' : ''
                     }`}
-                    style={{ width: `${Math.max(0, Math.min(100, (fightHud.p1Life / Math.max(1, fightHud.p1MaxLife)) * 100))}%` }}
-                  />
+                    title={`${characterName} (P1) — Icon 9000,0`}
+                  >
+                    {team1PortraitUrls[0] ? (
+                      <img
+                        src={team1PortraitUrls[0]}
+                        alt={`${characterName} P1 icon`}
+                        className="w-full h-full object-contain"
+                        style={{ imageRendering: 'pixelated' }}
+                      />
+                    ) : (
+                      <span className="text-xs sm:text-sm font-black text-emerald-300 uppercase">
+                        {(characterName || 'P1').slice(0, 2)}
+                      </span>
+                    )}
+                    {fightHud.p1Life <= 0 && (
+                      <span className="absolute inset-0 bg-black/60 flex items-center justify-center text-[8px] font-black text-rose-400">
+                        KO
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex-1 min-w-0 flex flex-col gap-0.5 sm:gap-1">
+                    <div className="flex items-center justify-between text-[9px] sm:text-[10px] font-bold px-0.5 gap-1">
+                      <span className="text-white uppercase tracking-wider truncate drop-shadow">
+                        {characterName} <span className="text-emerald-400 font-mono">P1</span>
+                      </span>
+                      <span className="font-mono text-zinc-200 tabular-nums drop-shadow shrink-0">
+                        {fightHud.p1Life}/{fightHud.p1MaxLife}
+                      </span>
+                    </div>
+                    <div className="relative h-3.5 sm:h-4 bg-[#171219]/90 border-2 border-zinc-300/70 rounded-sm overflow-hidden shadow-md flex justify-end">
+                      <div
+                        className="absolute inset-y-0 right-0 bg-rose-600/85 transition-[width] duration-150"
+                        style={{ width: `${Math.max(0, Math.min(100, (fightHud.p1Trail / Math.max(1, fightHud.p1MaxLife)) * 100))}%` }}
+                      />
+                      <div
+                        className={`relative h-full transition-[width] duration-75 ${
+                          fightHud.p1Life / Math.max(1, fightHud.p1MaxLife) > 0.5
+                            ? 'bg-gradient-to-l from-emerald-400 to-lime-400'
+                            : fightHud.p1Life / Math.max(1, fightHud.p1MaxLife) > 0.25
+                              ? 'bg-gradient-to-l from-amber-400 to-yellow-300'
+                              : 'bg-gradient-to-l from-red-500 to-orange-500'
+                        }`}
+                        style={{ width: `${Math.max(0, Math.min(100, (fightHud.p1Life / Math.max(1, fightHud.p1MaxLife)) * 100))}%` }}
+                      />
+                    </div>
+                  </div>
                 </div>
+
+                {/* Team 1 Ally Bars (2v2 / 3v3 / 4v4) */}
+                {fightHud.team1.slice(1).map(ally => {
+                  const iconUrl = team1PortraitUrls[ally.slotIdx];
+                  const isKo = ally.life <= 0;
+                  return (
+                    <div key={ally.id} className={`flex items-center gap-1.5 pl-0.5 ${isKo ? 'opacity-55' : ''}`}>
+                      <div className="w-5 h-5 sm:w-6 sm:h-6 shrink-0 rounded-sm bg-[#14111a]/95 border border-teal-400/75 overflow-hidden flex items-center justify-center relative">
+                        {iconUrl ? (
+                          <img
+                            src={iconUrl}
+                            alt={`Ally ${ally.slotIdx + 1} icon`}
+                            className={`w-full h-full object-contain ${isKo ? 'grayscale' : ''}`}
+                            style={{ imageRendering: 'pixelated' }}
+                          />
+                        ) : (
+                          <span className="text-[8px] font-black text-teal-300">A{ally.slotIdx + 1}</span>
+                        )}
+                        {isKo && (
+                          <span className="absolute inset-0 bg-black/65 flex items-center justify-center text-[7px] font-black text-rose-400">
+                            KO
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                        <div className="flex items-center justify-between text-[8px] font-mono leading-none px-0.5">
+                          <span className="text-teal-300 font-bold">ALLY {ally.slotIdx + 1}</span>
+                          <span className="text-zinc-300 tabular-nums">{ally.life}/{ally.maxLife}</span>
+                        </div>
+                        <div className="relative h-2 bg-[#171219]/90 border border-zinc-400/60 rounded-sm overflow-hidden flex justify-end">
+                          <div
+                            className="absolute inset-y-0 right-0 bg-rose-600/85 transition-[width] duration-150"
+                            style={{ width: `${Math.max(0, Math.min(100, (ally.trail / Math.max(1, ally.maxLife)) * 100))}%` }}
+                          />
+                          <div
+                            className="relative h-full bg-gradient-to-l from-teal-400 to-emerald-400 transition-[width] duration-75"
+                            style={{ width: `${Math.max(0, Math.min(100, (ally.life / Math.max(1, ally.maxLife)) * 100))}%` }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+
                 {fightHud.p1Combo >= 2 && (
-                  <div className="self-start mt-1 px-2 py-0.5 rounded bg-amber-500/90 text-black font-black text-[10px] sm:text-[11px] tracking-wider italic shadow">
+                  <div className="self-start mt-0.5 px-2 py-0.5 rounded bg-amber-500/90 text-black font-black text-[10px] sm:text-[11px] tracking-wider italic shadow">
                     {fightHud.p1Combo} HITS!
                   </div>
                 )}
               </div>
 
               {/* Infinite Time Badge */}
-              <div className="w-12 sm:w-14 h-9 sm:h-11 bg-[#14141b]/95 border-2 border-amber-400/70 rounded-md flex flex-col items-center justify-center shadow-lg shrink-0">
-                <span className="text-lg sm:text-xl font-black leading-none text-amber-300">∞</span>
-                <span className="text-[7px] font-mono uppercase tracking-widest text-zinc-400 mt-0.5">TIME</span>
+              <div className="w-10 sm:w-14 h-9 sm:h-11 bg-[#14141b]/95 border-2 border-amber-400/70 rounded-md flex flex-col items-center justify-center shadow-lg shrink-0">
+                <span className="text-base sm:text-xl font-black leading-none text-amber-300">∞</span>
+                <span className="text-[7px] font-mono uppercase tracking-widest text-zinc-400 mt-0.5">
+                  {teamSize > 1 ? `${teamSize}v${teamSize}` : 'TIME'}
+                </span>
               </div>
 
-              {/* P2 Life */}
-              <div className="flex-1 flex flex-col gap-0.5 sm:gap-1">
-                <div className="flex items-center justify-between text-[9px] sm:text-[10px] font-bold px-1">
-                  <span className="font-mono text-zinc-200 tabular-nums drop-shadow">
-                    {fightHud.p2Life}/{fightHud.p2MaxLife}
-                  </span>
-                  <span className="text-white uppercase tracking-wider truncate drop-shadow flex items-center gap-1">
-                    <span className="text-cyan-300 font-mono">
-                      {aiDifficulty === 'dummy' ? 'DUMMY' : 'CPU'}
-                    </span>
-                    <span className="truncate">{characterName}</span>
-                  </span>
-                </div>
-                <div className="relative h-3.5 sm:h-4 bg-[#171219]/90 border-2 border-zinc-300/70 rounded-sm overflow-hidden shadow-md flex justify-start">
+              {/* Team 2 Life & Portrait (9000,0) (+ Opponents in 2v2/3v3/4v4) */}
+              <div className="flex-1 min-w-0 flex flex-col gap-1">
+                <div className="flex items-start gap-1.5 sm:gap-2">
+                  <div className="flex-1 min-w-0 flex flex-col gap-0.5 sm:gap-1">
+                    <div className="flex items-center justify-between text-[9px] sm:text-[10px] font-bold px-0.5 gap-1">
+                      <span className="font-mono text-zinc-200 tabular-nums drop-shadow shrink-0">
+                        {fightHud.team2[0]?.life ?? fightHud.p2Life}/{fightHud.team2[0]?.maxLife ?? fightHud.p2MaxLife}
+                      </span>
+                      <span className="text-white uppercase tracking-wider truncate drop-shadow flex items-center gap-1">
+                        <span className="text-cyan-300 font-mono">
+                          {aiDifficulty === 'dummy' ? 'DUMMY' : teamSize > 1 ? 'CPU 1' : 'CPU'}
+                        </span>
+                        <span className="truncate">{characterName}</span>
+                      </span>
+                    </div>
+                    <div className="relative h-3.5 sm:h-4 bg-[#171219]/90 border-2 border-zinc-300/70 rounded-sm overflow-hidden shadow-md flex justify-start">
+                      <div
+                        className="absolute inset-y-0 left-0 bg-rose-600/85 transition-[width] duration-150"
+                        style={{ width: `${Math.max(0, Math.min(100, ((fightHud.team2[0]?.trail ?? fightHud.p2Trail) / Math.max(1, fightHud.team2[0]?.maxLife ?? fightHud.p2MaxLife)) * 100))}%` }}
+                      />
+                      <div
+                        className={`relative h-full transition-[width] duration-75 ${
+                          (fightHud.team2[0]?.life ?? fightHud.p2Life) / Math.max(1, fightHud.team2[0]?.maxLife ?? fightHud.p2MaxLife) > 0.5
+                            ? 'bg-gradient-to-r from-emerald-400 to-lime-400'
+                            : (fightHud.team2[0]?.life ?? fightHud.p2Life) / Math.max(1, fightHud.team2[0]?.maxLife ?? fightHud.p2MaxLife) > 0.25
+                              ? 'bg-gradient-to-r from-amber-400 to-yellow-300'
+                              : 'bg-gradient-to-r from-red-500 to-orange-500'
+                        }`}
+                        style={{ width: `${Math.max(0, Math.min(100, ((fightHud.team2[0]?.life ?? fightHud.p2Life) / Math.max(1, fightHud.team2[0]?.maxLife ?? fightHud.p2MaxLife)) * 100))}%` }}
+                      />
+                    </div>
+                  </div>
+
                   <div
-                    className="absolute inset-y-0 left-0 bg-rose-600/85 transition-[width] duration-150"
-                    style={{ width: `${Math.max(0, Math.min(100, (fightHud.p2Trail / Math.max(1, fightHud.p2MaxLife)) * 100))}%` }}
-                  />
-                  <div
-                    className={`relative h-full transition-[width] duration-75 ${
-                      fightHud.p2Life / Math.max(1, fightHud.p2MaxLife) > 0.5
-                        ? 'bg-gradient-to-r from-emerald-400 to-lime-400'
-                        : fightHud.p2Life / Math.max(1, fightHud.p2MaxLife) > 0.25
-                          ? 'bg-gradient-to-r from-amber-400 to-yellow-300'
-                          : 'bg-gradient-to-r from-red-500 to-orange-500'
+                    className={`w-9 h-9 sm:w-11 sm:h-11 shrink-0 rounded-sm bg-[#14111a]/95 border-2 border-cyan-400/80 shadow-md overflow-hidden flex items-center justify-center relative ${
+                      (fightHud.team2[0]?.life ?? 1) <= 0 ? 'grayscale opacity-50' : ''
                     }`}
-                    style={{ width: `${Math.max(0, Math.min(100, (fightHud.p2Life / Math.max(1, fightHud.p2MaxLife)) * 100))}%` }}
-                  />
+                    title={`${characterName} (Opponent) — Icon 9000,0`}
+                  >
+                    {team2PortraitUrls[0] ? (
+                      <img
+                        src={team2PortraitUrls[0]}
+                        alt={`${characterName} P2 icon`}
+                        className="w-full h-full object-contain -scale-x-100"
+                        style={{ imageRendering: 'pixelated' }}
+                      />
+                    ) : (
+                      <span className="text-xs sm:text-sm font-black text-cyan-300 uppercase">
+                        {(characterName || 'P2').slice(0, 2)}
+                      </span>
+                    )}
+                    {(fightHud.team2[0]?.life ?? 1) <= 0 && (
+                      <span className="absolute inset-0 bg-black/60 flex items-center justify-center text-[8px] font-black text-rose-400">
+                        KO
+                      </span>
+                    )}
+                  </div>
                 </div>
+
+                {/* Team 2 Teammate Bars (2v2 / 3v3 / 4v4) */}
+                {fightHud.team2.slice(1).map(enemy => {
+                  const iconUrl = team2PortraitUrls[enemy.slotIdx];
+                  const isKo = enemy.life <= 0;
+                  return (
+                    <div key={enemy.id} className={`flex items-center gap-1.5 pr-0.5 ${isKo ? 'opacity-55' : ''}`}>
+                      <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                        <div className="flex items-center justify-between text-[8px] font-mono leading-none px-0.5">
+                          <span className="text-zinc-300 tabular-nums">{enemy.life}/{enemy.maxLife}</span>
+                          <span className="text-cyan-300 font-bold">
+                            {aiDifficulty === 'dummy' ? `DMY ${enemy.slotIdx + 1}` : `CPU ${enemy.slotIdx + 1}`}
+                          </span>
+                        </div>
+                        <div className="relative h-2 bg-[#171219]/90 border border-zinc-400/60 rounded-sm overflow-hidden flex justify-start">
+                          <div
+                            className="absolute inset-y-0 left-0 bg-rose-600/85 transition-[width] duration-150"
+                            style={{ width: `${Math.max(0, Math.min(100, (enemy.trail / Math.max(1, enemy.maxLife)) * 100))}%` }}
+                          />
+                          <div
+                            className="relative h-full bg-gradient-to-r from-cyan-400 to-sky-400 transition-[width] duration-75"
+                            style={{ width: `${Math.max(0, Math.min(100, (enemy.life / Math.max(1, enemy.maxLife)) * 100))}%` }}
+                          />
+                        </div>
+                      </div>
+                      <div className="w-5 h-5 sm:w-6 sm:h-6 shrink-0 rounded-sm bg-[#14111a]/95 border border-cyan-400/75 overflow-hidden flex items-center justify-center relative">
+                        {iconUrl ? (
+                          <img
+                            src={iconUrl}
+                            alt={`CPU ${enemy.slotIdx + 1} icon`}
+                            className={`w-full h-full object-contain -scale-x-100 ${isKo ? 'grayscale' : ''}`}
+                            style={{ imageRendering: 'pixelated' }}
+                          />
+                        ) : (
+                          <span className="text-[8px] font-black text-cyan-300">C{enemy.slotIdx + 1}</span>
+                        )}
+                        {isKo && (
+                          <span className="absolute inset-0 bg-black/65 flex items-center justify-center text-[7px] font-black text-rose-400">
+                            KO
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+
                 {fightHud.p2Combo >= 2 && (
-                  <div className="self-end mt-1 px-2 py-0.5 rounded bg-rose-500/90 text-white font-black text-[10px] sm:text-[11px] tracking-wider italic shadow">
+                  <div className="self-end mt-0.5 px-2 py-0.5 rounded bg-rose-500/90 text-white font-black text-[10px] sm:text-[11px] tracking-wider italic shadow">
                     {fightHud.p2Combo} HITS!
                   </div>
                 )}
@@ -5063,14 +5502,18 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
                   </div>
                   <div className="text-[11px] sm:text-xs font-bold uppercase tracking-wider text-zinc-200">
                     {fightOutcome === 'P1_WIN'
-                      ? `${characterName} (P1) WINS!`
+                      ? teamSize > 1
+                        ? `${characterName} TEAM (${teamSize}v${teamSize}) WINS!`
+                        : `${characterName} (P1) WINS!`
                       : fightOutcome === 'P2_WIN'
-                        ? `${characterName} (${aiDifficulty === 'dummy' ? 'DUMMY' : 'CPU'}) WINS!`
+                        ? teamSize > 1
+                          ? `${aiDifficulty === 'dummy' ? 'DUMMY' : 'CPU'} TEAM (${teamSize}v${teamSize}) WINS!`
+                          : `${characterName} (${aiDifficulty === 'dummy' ? 'DUMMY' : 'CPU'}) WINS!`
                         : 'MATCH DRAW'}
                   </div>
                   <button
                     type="button"
-                    onClick={() => resetArena('fight')}
+                    onClick={() => resetArena('fight', teamSize)}
                     className="mt-1 px-4 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow"
                   >
                     <RotateCcw size={12} />

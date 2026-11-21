@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Gamepad2, Eye, RotateCcw, Volume2, Search, Zap, Move, ArrowDown, CornerUpLeft, SlidersHorizontal, Keyboard, Swords, Shield, Cpu, Trophy, ChevronDown, ChevronUp } from 'lucide-react';
 import { applyPalette } from '../lib/mugen/actParser';
-import type { AirData, ClsnBox, SffData } from '../lib/mugen/types';
+import type { AirData, AirElement, ClsnBox, SffData } from '../lib/mugen/types';
 import type { SndData } from '../lib/mugen/sndParser';
 
 interface TextFileLike {
@@ -104,6 +104,7 @@ interface ParsedController {
   superPowerAdd?: number;
   hitDef?: ParsedHitDef;
   stateTypeVal?: 'S' | 'C' | 'A' | 'L';
+  moveTypeVal?: 'I' | 'A' | 'H';
   physicsVal?: 'S' | 'C' | 'A' | 'N';
   ctrlVal?: number;
 }
@@ -114,6 +115,7 @@ interface ParsedStateInfo {
   stateType: 'S' | 'C' | 'A' | 'L';
   moveType: 'I' | 'A' | 'H';
   physics: 'S' | 'C' | 'A' | 'N';
+  ctrlVal?: 0 | 1;
   anim?: number;
   velSetX?: number;
   velSetY?: number;
@@ -282,6 +284,12 @@ interface EvalContext {
   moveGuarded: number;
   mode: 'practice' | 'fight';
   p2BodyDistX?: number;
+  p2PosY?: number;
+  p2StateType?: 'S' | 'C' | 'A' | 'L';
+  p2MoveType?: 'I' | 'A' | 'H';
+  p2StateNo?: number;
+  p2Life?: number;
+  actElements?: AirElement[];
   constants: CharacterPhysicsConstants;
   heldCmds?: Set<string>;
 }
@@ -495,12 +503,35 @@ function evalSingleClause(rawClause: string, ctx: EvalContext): boolean {
     return compareOp(ctx.animElem, op, targetElem);
   }
 
-  // AnimElemTime(N) <op> M
+  // AnimElemTime(N) <op> M (across entire animation timeline)
   const animElemTimeMatch = clause.match(/^animelemtime\s*\(\s*(\d+)\s*\)\s*(=|!=|<|<=|>|>=)\s*(-?\d+)$/i);
   if (animElemTimeMatch) {
     const targetElem = parseInt(animElemTimeMatch[1], 10);
     const op = animElemTimeMatch[2];
     const rhs = parseInt(animElemTimeMatch[3], 10);
+    if (ctx.actElements && ctx.actElements.length > 0) {
+      if (targetElem < 1 || targetElem > ctx.actElements.length) return false;
+      const curIdx = ctx.animElem - 1;
+      const tgtIdx = targetElem - 1;
+      let elemTimeVal = ctx.animElemTick;
+      if (tgtIdx < curIdx) {
+        let elapsed = ctx.animElemTick;
+        for (let i = tgtIdx; i < curIdx; i++) {
+          const d = ctx.actElements[i]?.time ?? 1;
+          elapsed += d < 0 ? 999999 : Math.max(1, d);
+        }
+        elemTimeVal = elapsed;
+      } else if (tgtIdx > curIdx) {
+        const curDur = ctx.actElements[curIdx]?.time ?? 1;
+        let rem = curDur < 0 ? 999999 : Math.max(1, curDur - ctx.animElemTick);
+        for (let i = curIdx + 1; i < tgtIdx; i++) {
+          const d = ctx.actElements[i]?.time ?? 1;
+          rem += d < 0 ? 999999 : Math.max(1, d);
+        }
+        elemTimeVal = -rem;
+      }
+      return compareOp(elemTimeVal, op, rhs);
+    }
     if (ctx.animElem !== targetElem) return false;
     return compareOp(ctx.animElemTick, op, rhs);
   }
@@ -594,9 +625,49 @@ function evalSingleClause(rawClause: string, ctx: EvalContext): boolean {
     if (p2DistMatch) {
       return compareOp(ctx.p2BodyDistX, p2DistMatch[1], parseFloat(p2DistMatch[2]));
     }
+    const p2DistYMatch = clause.match(/^p2(?:body)?dist\s+y\s*(=|!=|<|<=|>|>=)\s*(-?\d+(?:\.\d+)?)$/i);
+    if (p2DistYMatch && ctx.p2PosY !== undefined) {
+      return compareOp(ctx.p2PosY - ctx.posY, p2DistYMatch[1], parseFloat(p2DistYMatch[2]));
+    }
   }
 
-  // Opponent / command guards: do not prematurely fire hit/proximity transitions
+  // Opponent / hit-counter triggers commonly used in HitDef controllers
+  const p2StMatch = clause.match(/^(?:p2statetype|enemy(?:near)?\s*,\s*statetype)\s*(=|!=)\s*([SCAL])$/i);
+  if (p2StMatch && ctx.p2StateType) {
+    const target = p2StMatch[2].toUpperCase();
+    return p2StMatch[1] === '=' ? ctx.p2StateType === target : ctx.p2StateType !== target;
+  }
+  const p2MtMatch = clause.match(/^(?:p2movetype|enemy(?:near)?\s*,\s*movetype)\s*(=|!=)\s*([IAH])$/i);
+  if (p2MtMatch && ctx.p2MoveType) {
+    const target = p2MtMatch[2].toUpperCase();
+    return p2MtMatch[1] === '=' ? ctx.p2MoveType === target : ctx.p2MoveType !== target;
+  }
+  const p2SnoMatch = clause.match(/^(?:p2stateno|enemy(?:near)?\s*,\s*stateno)\s*(=|!=)\s*(-?\d+)$/i);
+  if (p2SnoMatch && ctx.p2StateNo !== undefined) {
+    const target = parseInt(p2SnoMatch[2], 10);
+    return p2SnoMatch[1] === '=' ? ctx.p2StateNo === target : ctx.p2StateNo !== target;
+  }
+  const p2LifeMatch = clause.match(/^(?:p2life|enemy(?:near)?\s*,\s*life)\s*(=|!=|<|<=|>|>=)\s*(-?\d+)$/i);
+  if (p2LifeMatch && ctx.p2Life !== undefined) {
+    return compareOp(ctx.p2Life, p2LifeMatch[1], parseInt(p2LifeMatch[2], 10));
+  }
+
+  const hitCntMatch = clause.match(/^(?:uniq)?hitcount\s*(=|!=|<|<=|>|>=)\s*(-?\d+)$/i);
+  if (hitCntMatch) {
+    return compareOp(ctx.moveHit > 0 ? 1 : 0, hitCntMatch[1], parseInt(hitCntMatch[2], 10));
+  }
+  const numTgtMatch = clause.match(/^numtarget(?:\s*\([^)]*\))?\s*(=|!=|<|<=|>|>=)\s*(-?\d+)$/i);
+  if (numTgtMatch) {
+    return compareOp(ctx.moveContact > 0 ? 1 : 0, numTgtMatch[1], parseInt(numTgtMatch[2], 10));
+  }
+  if (/^movereversed$/i.test(clause)) return false;
+  if (/^(?:hitover|hitshakeover)$/i.test(clause)) return true;
+  const randomMatch = clause.match(/^random\s*(=|!=|<|<=|>|>=)\s*(-?\d+)$/i);
+  if (randomMatch) {
+    return compareOp(Math.floor(Math.random() * 1000), randomMatch[1], parseInt(randomMatch[2], 10));
+  }
+
+  // Opponent / command guards: do not prematurely fire command proximity transitions
   if (/^(p2|enemy|command)\b/i.test(clause)) {
     return false;
   }
@@ -734,6 +805,7 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
     const commandOrGroups: string[][] = [];
     const forbiddenCommands: string[] = [];
     const allowedStateTypes = new Set<'S' | 'C' | 'A'>();
+    const forbiddenStateTypes = new Set<'S' | 'C' | 'A'>();
     let requireCtrl = false;
     let requiresP2Close = false;
     let triggerAllMinPower = 0;
@@ -746,6 +818,7 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
     let superMoveTime: number | undefined;
     let superPowerAdd: number | undefined;
     let ctrlStateTypeVal: 'S' | 'C' | 'A' | 'L' | undefined;
+    let ctrlMoveTypeVal: 'I' | 'A' | 'H' | undefined;
     let ctrlPhysicsVal: 'S' | 'C' | 'A' | 'N' | undefined;
     let ctrlVal: number | undefined;
     let triggerAll: string[] = [];
@@ -767,6 +840,7 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
       commandOrGroups.length = 0;
       forbiddenCommands.length = 0;
       allowedStateTypes.clear();
+      forbiddenStateTypes.clear();
       requireCtrl = false;
       requiresP2Close = false;
       triggerAllMinPower = 0;
@@ -779,6 +853,7 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
       superMoveTime = undefined;
       superPowerAdd = undefined;
       ctrlStateTypeVal = undefined;
+      ctrlMoveTypeVal = undefined;
       ctrlPhysicsVal = undefined;
       ctrlVal = undefined;
       triggerAll = [];
@@ -854,6 +929,13 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
         if (stateTypeCtrl === 'changestate' && stateValNum !== null) {
           if (isGlobalCmdState && (stateCmdRef || requiredAllCommands.length > 0 || commandOrGroups.length > 0)) {
             const minBranchPower = branchMinPowers.length > 0 ? Math.min(...branchMinPowers) : 0;
+            let resolvedAllowed: ('S' | 'C' | 'A')[] = [];
+            if (allowedStateTypes.size > 0) {
+              const filtered = Array.from(allowedStateTypes).filter(t => !forbiddenStateTypes.has(t));
+              resolvedAllowed = filtered.length > 0 ? filtered : Array.from(allowedStateTypes);
+            } else if (forbiddenStateTypes.size > 0) {
+              resolvedAllowed = (['S', 'C', 'A'] as const).filter(t => !forbiddenStateTypes.has(t));
+            }
             rules.push({
               commandName: stateCmdRef || requiredAllCommands[0] || commandOrGroups[0]?.[0] || '',
               matchedCommands: matchedCommands.length > 0 ? [...matchedCommands] : [stateCmdRef],
@@ -862,7 +944,7 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
               requiredAllOrSets: [...requiredAllOrSets],
               commandOrGroups: [...commandOrGroups],
               forbiddenCommands: [...forbiddenCommands],
-              allowedStateTypes: Array.from(allowedStateTypes),
+              allowedStateTypes: resolvedAllowed,
               targetState: stateValNum,
               requireCtrl,
               requiresP2Close,
@@ -960,6 +1042,7 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
               superPowerAdd,
               hitDef: builtHitDef,
               stateTypeVal: ctrlStateTypeVal,
+              moveTypeVal: ctrlMoveTypeVal,
               physicsVal: ctrlPhysicsVal,
               ctrlVal,
             });
@@ -1155,6 +1238,9 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
           if (/\bH[APT]\b/i.test(val) || /,\s*H/i.test(val)) {
             st.isHyper = true;
           }
+        } else if (key === 'ctrl') {
+          const c = parseInt(val, 10);
+          if (c === 0 || c === 1) st.ctrlVal = c;
         }
       } else if (/^state(?:\s|,|\d|-|$)/i.test(secLower)) {
         if (key === 'type') {
@@ -1183,6 +1269,9 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
         } else if (key === 'statetype' && stateTypeCtrl === 'statetypeset') {
           const t = val.toUpperCase().charAt(0);
           if (t === 'S' || t === 'C' || t === 'A' || t === 'L') ctrlStateTypeVal = t;
+        } else if (key === 'movetype' && stateTypeCtrl === 'statetypeset') {
+          const m = val.toUpperCase().charAt(0);
+          if (m === 'I' || m === 'A' || m === 'H') ctrlMoveTypeVal = m;
         } else if (key === 'physics' && stateTypeCtrl === 'statetypeset') {
           const p = val.toUpperCase().charAt(0);
           if (p === 'S' || p === 'C' || p === 'A' || p === 'N') ctrlPhysicsVal = p;
@@ -1322,10 +1411,9 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
           if (/statetype\s*=\s*S\b/i.test(val)) allowedStateTypes.add('S');
           if (/statetype\s*=\s*C\b/i.test(val)) allowedStateTypes.add('C');
           if (/statetype\s*=\s*A\b/i.test(val)) allowedStateTypes.add('A');
-          if (/statetype\s*!=\s*A\b/i.test(val)) {
-            allowedStateTypes.add('S');
-            allowedStateTypes.add('C');
-          }
+          if (/statetype\s*!=\s*A\b/i.test(val)) forbiddenStateTypes.add('A');
+          if (/statetype\s*!=\s*C\b/i.test(val)) forbiddenStateTypes.add('C');
+          if (/statetype\s*!=\s*S\b/i.test(val)) forbiddenStateTypes.add('S');
           if (/animtime\s*=\s*0|!\s*animtime\b/i.test(val)) {
             ctrlHasAnimTimeEnd = true;
           }
@@ -1553,6 +1641,7 @@ interface FighterRuntime {
   aiWalkDir: -1 | 0 | 1;
   aiHoldDown: boolean;
   aiBlockTimer: number;
+  pendingLanding?: boolean;
 }
 
 function createFighterRuntime(
@@ -2033,6 +2122,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     f.moveContact = 0;
     f.moveHit = 0;
     f.moveGuarded = 0;
+    f.pendingLanding = false;
 
     if (targetState !== 100 && f.runLocked) {
       f.runLocked = false;
@@ -2040,9 +2130,11 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     }
 
     const isKnownAirState =
+      targetState === 40 ||
       targetState === 41 ||
       targetState === 45 ||
       targetState === 50 ||
+      targetState === 51 ||
       targetState === 105 ||
       targetState === 154 ||
       targetState === 5050 ||
@@ -2076,10 +2168,22 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           : targetState === 10 || targetState === 11 || (targetState >= 400 && targetState < 500)
             ? 'C'
             : 'S');
-      f.ctrl =
-        targetState === 0 || targetState === 11 || targetState === 20 || targetState === 21 || targetState === 100
+      const isJumpCtrlState =
+        targetState === 40 ||
+        targetState === 41 ||
+        targetState === 45 ||
+        targetState === 50 ||
+        targetState === 51;
+      const defaultCtrl =
+        targetState === 0 ||
+        targetState === 11 ||
+        targetState === 20 ||
+        targetState === 21 ||
+        isJumpCtrlState ||
+        targetState === 100
           ? 1
           : 0;
+      f.ctrl = isJumpCtrlState ? 1 : (stateDef?.ctrlVal ?? defaultCtrl);
 
       if (modeRef.current === 'fight' && stateDef?.powerAdd !== undefined) {
         f.power = Math.max(0, Math.min(f.maxPower, f.power + stateDef.powerAdd));
@@ -2093,6 +2197,13 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       } else if (targetState === 100) {
         f.velX = stateDef?.velSetX !== undefined ? stateDef.velSetX : constants.runFwdX;
         f.velY = stateDef?.velSetY ?? 0;
+      } else if (isJumpCtrlState) {
+        if (stateDef?.velSetX !== undefined && stateDef.velSetX !== 0 && f.velX === 0) {
+          f.velX = stateDef.velSetX;
+        }
+        if (stateDef?.velSetY !== undefined && stateDef.velSetY < 0) {
+          f.velY = stateDef.velSetY;
+        }
       } else if (stateDef?.velSetX !== undefined || stateDef?.velSetY !== undefined) {
         if (stateDef.velSetX !== undefined) f.velX = stateDef.velSetX;
         if (stateDef.velSetY !== undefined) f.velY = stateDef.velSetY;
@@ -2219,7 +2330,18 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
   };
 
   const currentStanceType = (f: FighterRuntime = p1Ref.current): 'S' | 'C' | 'A' => {
-    if (f.posY < 270) return 'A';
+    if (
+      f.posY < 270 ||
+      f.velY < 0 ||
+      f.stateType === 'A' ||
+      f.stateNo === 40 ||
+      f.stateNo === 41 ||
+      f.stateNo === 45 ||
+      f.stateNo === 50 ||
+      f.stateNo === 51
+    ) {
+      return 'A';
+    }
     if (f.heldDirs.has('D') || f.crouchLocked || f.stateNo === 10 || f.stateNo === 11) return 'C';
     return 'S';
   };
@@ -2295,8 +2417,24 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
     if (!ignoreStance) {
       const stance = stanceOverride ?? currentStanceType(f);
-      if (rule.allowedStateTypes.length > 0 && !rule.allowedStateTypes.includes(stance)) {
-        return { matches: false, multiWeight: 0 };
+      if (rule.allowedStateTypes.length > 0) {
+        if (!rule.allowedStateTypes.includes(stance)) {
+          return { matches: false, multiWeight: 0 };
+        }
+      } else {
+        const tgtState = states[rule.targetState];
+        const isGroundOnlyTarget =
+          tgtState?.stateType === 'S' ||
+          tgtState?.stateType === 'C' ||
+          (rule.targetState >= 200 && rule.targetState < 600 && tgtState?.stateType !== 'A');
+        const isAirOnlyTarget =
+          tgtState?.stateType === 'A' || (rule.targetState >= 600 && rule.targetState < 700);
+        if (stance === 'A' && isGroundOnlyTarget) {
+          return { matches: false, multiWeight: 0 };
+        }
+        if (stance !== 'A' && isAirOnlyTarget) {
+          return { matches: false, multiWeight: 0 };
+        }
       }
     }
 
@@ -2548,7 +2686,20 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     let bestCandidate: { rule: ParsedChangeStateRule; label: string; score: number; isMulti: boolean } | null = null;
     for (let rIdx = 0; rIdx < rules.length; rIdx++) {
       const rule = rules[rIdx];
-      if (modeRef.current === 'fight' && rule.requireCtrl && p1.ctrl === 0 && !(activeBtnSet.size >= 2 && isUpgradeWindow)) {
+      const isAirChainCancel =
+        p1.moveContact > 0 &&
+        stanceForCheck === 'A' &&
+        rule.targetState !== p1.stateNo &&
+        (rule.allowedStateTypes.includes('A') ||
+          states[rule.targetState]?.stateType === 'A' ||
+          (rule.targetState >= 600 && rule.targetState < 700));
+      if (
+        modeRef.current === 'fight' &&
+        rule.requireCtrl &&
+        p1.ctrl === 0 &&
+        !isAirChainCancel &&
+        !(activeBtnSet.size >= 2 && isUpgradeWindow)
+      ) {
         continue;
       }
       const ctxRes = ruleMatchesCurrentContext(rule, satisfiedCmdNames, activeBtnSet, stanceForCheck, false, p1);
@@ -2572,10 +2723,18 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
       const effectiveChord = Math.max(bestLastParts, ctxRes.multiWeight);
       const isMulti = effectiveChord >= 2 || bestChordWeight > bestTokenCount;
+      const airBonus =
+        stanceForCheck === 'A' &&
+        (rule.allowedStateTypes.includes('A') ||
+          states[rule.targetState]?.stateType === 'A' ||
+          (rule.targetState >= 600 && rule.targetState < 700))
+          ? 500
+          : 0;
       const score =
         effectiveChord * 10000 +
         bestTokenCount * 200 +
         bestChordWeight * 20 +
+        airBonus +
         (rules.length - rIdx) * 0.001;
 
       if (!bestCandidate || score > bestCandidate.score) {
@@ -2605,7 +2764,10 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       p1.stateNo === 20 ||
       p1.stateNo === 21 ||
       p1.stateNo === 100 ||
-      p1.posY < 270;
+      p1.posY < 270 ||
+      p1.velY < 0 ||
+      p1.stateType === 'A' ||
+      (p1.stateNo >= 40 && p1.stateNo <= 52);
 
     if (canAttack && (modeRef.current === 'practice' || p1.ctrl === 1)) {
       const stance = stanceForCheck;
@@ -2613,7 +2775,19 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       const fallbackMap: Record<string, number> = { x: 0, y: 10, z: 20, a: 30, b: 40, c: 50 };
       const singleTok = Array.from(activeBtnSet).reverse().find(b => fallbackMap[b] !== undefined);
       if (singleTok) {
-        const st = baseOffset + fallbackMap[singleTok];
+        let st = baseOffset + fallbackMap[singleTok];
+        if (stance === 'A' && !states[st] && !airData?.actions[st]) {
+          const altMap: Record<string, number[]> = {
+            x: [600, 601, 610],
+            y: [610, 601, 600, 620],
+            z: [620, 610, 602, 600],
+            a: [630, 603, 640],
+            b: [640, 630, 604, 650],
+            c: [650, 640, 605, 630],
+          };
+          const altFound = (altMap[singleTok] || []).find(cand => states[cand] || airData?.actions[cand]);
+          if (altFound !== undefined) st = altFound;
+        }
         if (states[st] || airData?.actions[st]) {
           if (activeBtnSet.size === 1) {
             lastChordUpgradeRef.current = { time: now, stance };
@@ -2679,14 +2853,15 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       if (rawDir === 'U' && p1.posY >= 270 && (modeRef.current === 'practice' || p1.ctrl === 1)) {
         setCrouchLocked(false);
         p1.crouchLocked = false;
-        p1.velY = constants.jumpNeuY;
+        p1.velY = constants.jumpNeuY < -1 ? constants.jumpNeuY : -8.4;
         const jumpLocalX = p1.heldDirs.has('F')
           ? (p1.facing === 1 ? constants.jumpFwdX : constants.jumpBackX)
           : p1.heldDirs.has('B')
             ? (p1.facing === -1 ? constants.jumpFwdX : constants.jumpBackX)
             : constants.jumpNeuX;
         p1.velX = jumpLocalX;
-        triggerStateTransition(airData?.actions[41] ? 41 : 40, 'Jump');
+        const jumpState = states[50] ? 50 : airData?.actions[41] ? 41 : 40;
+        triggerStateTransition(jumpState, 'Jump');
       } else if (rawDir === 'D') {
         enterCrouch(p1);
       }
@@ -3032,6 +3207,12 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           moveGuarded: f.moveGuarded,
           mode: modeRef.current,
           p2BodyDistX: Math.max(0, Math.abs(opp.posX - f.posX) - 24),
+          p2PosY: opp.posY - 270,
+          p2StateType: opp.stateType,
+          p2MoveType: opp.moveType,
+          p2StateNo: opp.stateNo,
+          p2Life: opp.life,
+          actElements: act?.elements,
           constants,
           heldCmds,
         };
@@ -3075,6 +3256,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
             if (ctrl.ctrlVal !== undefined) f.ctrl = ctrl.ctrlVal;
           } else if (ctrl.type === 'statetypeset') {
             if (ctrl.stateTypeVal) f.stateType = ctrl.stateTypeVal;
+            if (ctrl.moveTypeVal) f.moveType = ctrl.moveTypeVal;
             if (ctrl.physicsVal) f.physics = ctrl.physicsVal;
           } else if (ctrl.type === 'poweradd') {
             const pwKey = `pw-${ctrl.id}-e${ctx.animElem}-t${f.stateTime}`;
@@ -3421,6 +3603,19 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           f.tickInFrame = 0;
         }
       } else {
+        // Allow quick diagonal UF/UB input within first 2 ticks of jump to steer jump arc
+        if (
+          (f.stateNo === 40 || f.stateNo === 41 || f.stateNo === 45 || f.stateNo === 50 || f.stateNo === 51) &&
+          f.stateTime <= 2 &&
+          f.velX === 0
+        ) {
+          if (f.heldDirs.has('F')) {
+            f.velX = f.facing === 1 ? constants.jumpFwdX : constants.jumpBackX;
+          } else if (f.heldDirs.has('B')) {
+            f.velX = f.facing === -1 ? constants.jumpFwdX : constants.jumpBackX;
+          }
+        }
+
         if (f.stateNo === 100) {
           const holdRunFwd = getCharHeldDirs(f).has('F') || f.runLocked;
           const st100 = states[100];
@@ -3449,36 +3644,32 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
         }
       }
 
-      // Vertical velocity & gravity
+      // Vertical velocity & gravity (defer landing state reset to advanceFighterAnim after resolveHit!)
       if (f.posY < 270 || f.velY < 0) {
         f.posY += f.velY;
+        const hasGravityCtrl = Boolean(states[f.stateNo]?.controllers.some(c => c.type === 'gravity'));
         const shouldApplyGravity =
-          f.physics === 'A' ||
-          f.stateNo === 105 ||
-          (f.stateNo >= 40 && f.stateNo <= 52) ||
-          f.stateNo === 0 ||
-          f.stateNo === 11;
+          !hasGravityCtrl &&
+          (f.physics === 'A' ||
+            f.stateNo === 105 ||
+            (f.stateNo >= 40 && f.stateNo <= 52) ||
+            (f.stateNo >= 600 && f.stateNo < 700) ||
+            f.stateNo === 0 ||
+            f.stateNo === 11);
         if (shouldApplyGravity) {
           f.velY += constants.yaccel;
         }
         if (f.posY >= 270) {
           f.posY = 270;
           const prevVelY = f.velY;
-          if (f.stateNo === 105) {
-            f.velY = 0;
-            f.velX = 0;
-            transitionFighterState(f, states[106] || airData?.actions[106] ? 106 : downNow ? 11 : 0);
-          } else if ((f.stateNo >= 40 && f.stateNo <= 52) || (f.stateNo >= 600 && f.stateNo < 700)) {
-            f.velY = 0;
-            f.velX = 0;
-            transitionFighterState(f, downNow ? 11 : 0);
-          } else if (prevVelY > 0) {
-            runControllersForFighter(f, opp);
-            if (f.posY >= 270 && f.velY >= 0) {
-              f.velY = 0;
-            }
-          } else {
-            f.velY = 0;
+          f.velY = 0;
+          if (
+            f.stateNo === 105 ||
+            (f.stateNo >= 40 && f.stateNo <= 52) ||
+            (f.stateNo >= 600 && f.stateNo < 700) ||
+            prevVelY > 0
+          ) {
+            f.pendingLanding = true;
           }
         }
       }
@@ -3495,6 +3686,30 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       }
 
       const downNow = f.heldDirs.has('D') || f.crouchLocked || f.aiHoldDown;
+
+      if (f.pendingLanding) {
+        f.pendingLanding = false;
+        if (f.stateNo === 105) {
+          f.velX = 0;
+          f.velY = 0;
+          transitionFighterState(f, states[106] || airData?.actions[106] ? 106 : downNow ? 11 : 0);
+          return;
+        }
+        if ((f.stateNo >= 40 && f.stateNo <= 52) || (f.stateNo >= 600 && f.stateNo < 700)) {
+          f.velX = 0;
+          f.velY = 0;
+          transitionFighterState(f, downNow ? 11 : 0);
+          return;
+        }
+        const beforeLandState = f.stateNo;
+        runControllersForFighter(f, opp);
+        if (f.stateNo !== beforeLandState) {
+          return;
+        }
+        if (f.posY >= 270 && f.velY >= 0) {
+          f.velY = 0;
+        }
+      }
 
       if (f.stateNo === 150 || f.stateNo === 152 || f.stateNo === 154) {
         f.stateTime++;
@@ -3590,6 +3805,12 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
                     moveGuarded: f.moveGuarded,
                     mode: modeRef.current,
                     p2BodyDistX: Math.max(0, Math.abs(opp.posX - f.posX) - 24),
+                    p2PosY: opp.posY - 270,
+                    p2StateType: opp.stateType,
+                    p2MoveType: opp.moveType,
+                    p2StateNo: opp.stateNo,
+                    p2Life: opp.life,
+                    actElements: act.elements,
                     constants,
                     heldCmds,
                   };
@@ -3656,8 +3877,8 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       let hitDef = atk.activeHitDef;
       if (!hitDef && atk.moveType === 'A' && !atk.hitScoredThisWindow) {
         const stDef = states[atk.stateNo];
-        const hasHitDefCtrl = Boolean(stDef?.controllers.some(c => c.type === 'hitdef'));
-        if (!hasHitDefCtrl) {
+        const hitDefCtrls = stDef?.controllers.filter(c => c.type === 'hitdef' && c.hitDef) || [];
+        if (hitDefCtrls.length === 0) {
           const isH = Boolean(stDef?.isHyper || atk.stateNo >= 3000);
           const isS = atk.stateNo >= 1000 && atk.stateNo < 3000;
           const dmg = isH ? 130 : isS ? 82 : 42;
@@ -3685,6 +3906,22 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
             fall: isH,
           };
           atk.activeHitDef = hitDef;
+        } else {
+          const currElem = atk.frameIdx + 1;
+          const matchingCtrl = hitDefCtrls.find(c => {
+            const trigs = [...c.triggerAll, ...(Object.values(c.triggerGroups) as string[][]).flat()];
+            const elemNums: number[] = [];
+            for (const t of trigs) {
+              const m = t.match(/animelem(?:time)?\s*(?:\(\s*(\d+)\s*\)|=\s*(\d+))/i);
+              if (m) elemNums.push(parseInt(m[1] || m[2], 10));
+            }
+            if (elemNums.length > 0 && Math.min(...elemNums) > currElem) return false;
+            return true;
+          });
+          if (matchingCtrl?.hitDef) {
+            hitDef = matchingCtrl.hitDef;
+            atk.activeHitDef = hitDef;
+          }
         }
       }
 
@@ -3891,8 +4128,8 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
             stepFighter(p1, p2);
             stepFighter(p2, p1);
 
-            // Body Pushbox separation
-            if (p1.life > 0 && p2.life > 0 && Math.abs(p1.posY - p2.posY) < 68) {
+            // Body Pushbox separation (only when vertically close so jump-ins aren't pushed off prematurely)
+            if (p1.life > 0 && p2.life > 0 && Math.abs(p1.posY - p2.posY) < 48) {
               const minSep = 32;
               const dx = p2.posX - p1.posX;
               if (Math.abs(dx) < minSep) {

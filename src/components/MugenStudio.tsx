@@ -12,7 +12,7 @@ import { parseIniString, stringifyIni, getIniField, getSectionKeyValue, stripIni
 import { parseSffBinary, extractPortraits } from '../lib/mugen/sffParser';
 import { generateTemplateSff, buildSffBinary } from '../lib/mugen/sffGenerator';
 import { templateAir, templateCmd, templateCns, templateDef } from '../lib/mugen/templateFiles';
-import { parseActBinary, applyPalette, imageToSpriteIndices } from '../lib/mugen/actParser';
+import { parseActBinary, applyPalette, imageToSpriteIndices, reversePalette, detectAndFixUpsideDownPalette } from '../lib/mugen/actParser';
 import { parseAirString, serializeAirData } from '../lib/mugen/airParser';
 import type { SffData, AirData } from '../lib/mugen/types';
 import { parseSndBinary, buildSndBinary } from '../lib/mugen/sndParser';
@@ -1167,7 +1167,11 @@ export default function MugenStudio({
     for (const file of files) {
         try {
             const buffer = await (file as any).arrayBuffer();
-            const paletteData = parseActBinary(buffer);
+            const rawPaletteData = parseActBinary(buffer);
+            const { palette: paletteData, wasFlipped } = detectAndFixUpsideDownPalette(rawPaletteData, baseSff.images);
+            if (wasFlipped) {
+                appendEngineLog(`Auto-flipped upside-down palette "${(file as any).name}" (0↔255).`);
+            }
             
             // Also set as the immediate active palette for rendering
             setActPalette(paletteData);
@@ -1198,6 +1202,39 @@ export default function MugenStudio({
     setSelectedPaletteIdx(nextPalettes.length - 1);
     pushToHistory(nextSff);
     if (paletteActInputRef.current) paletteActInputRef.current.value = '';
+  };
+
+  const handleFlipActivePalette = () => {
+    const sprite = sffData?.images?.[selectedSpriteIdx];
+    const hasCustomSpritePal = Boolean(sprite && sprite.isSharedPalette === false && sprite.palette);
+    const activePal = hasCustomSpritePal
+      ? sprite?.palette
+      : (sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette || sprite?.palette);
+    if (!activePal) return;
+
+    const flipped = reversePalette(activePal);
+
+    if (sffData) {
+      let nextSff = { ...sffData };
+      if (hasCustomSpritePal && sprite) {
+        const nextImages = sffData.images.map((img, idx) =>
+          idx === selectedSpriteIdx ? { ...img, palette: flipped } : img
+        );
+        nextSff = { ...nextSff, images: nextImages };
+      } else if (sffData.palettes && sffData.palettes[selectedPaletteIdx]) {
+        const nextPalettes = [...sffData.palettes];
+        nextPalettes[selectedPaletteIdx] = { ...nextPalettes[selectedPaletteIdx], data: flipped };
+        nextSff = { ...nextSff, palettes: nextPalettes };
+      }
+      sffDataRef.current = nextSff;
+      setSffData(nextSff);
+      pushToHistory(nextSff);
+    }
+
+    if (!hasCustomSpritePal) {
+      setActPalette(flipped);
+    }
+    appendEngineLog('Flipped active palette index order (0↔255).');
   };
 
   const handleDeletePalette = (idx: number) => {
@@ -1966,7 +2003,26 @@ export default function MugenStudio({
                 setActiveCmdFileId(fileId);
             } else if (ext === 'sff') {
                 const buffer = await file.arrayBuffer();
-                const parsed = parseSffBinary(buffer);
+                let parsed = parseSffBinary(buffer);
+                if (parsed.palettes && parsed.palettes.length > 0) {
+                  let anyFlipped = false;
+                  const fixedPalettes = parsed.palettes.map(pal => {
+                    const res = detectAndFixUpsideDownPalette(pal.data, parsed.images);
+                    if (res.wasFlipped) anyFlipped = true;
+                    return res.wasFlipped ? { ...pal, data: res.palette } : pal;
+                  });
+                  if (anyFlipped) {
+                    const fallbackFixed = fixedPalettes[0]?.data;
+                    parsed = {
+                      ...parsed,
+                      palettes: fixedPalettes,
+                      images: parsed.images.map(img =>
+                        img.isSharedPalette && fallbackFixed ? { ...img, palette: fallbackFixed } : img
+                      ),
+                    };
+                    appendEngineLog(`Auto-flipped upside-down SFF palette in "${file.name}" (0↔255).`);
+                  }
+                }
                 sffDataRef.current = parsed;
                 setSffData(parsed);
                 setSelectedSpriteIdx(0);
@@ -1986,7 +2042,11 @@ export default function MugenStudio({
                 }
             } else if (ext === 'act') {
                 const buffer = await file.arrayBuffer();
-                const paletteData = parseActBinary(buffer);
+                const rawPaletteData = parseActBinary(buffer);
+                const { palette: paletteData, wasFlipped } = detectAndFixUpsideDownPalette(rawPaletteData, sffDataRef.current?.images);
+                if (wasFlipped) {
+                  appendEngineLog(`Auto-flipped upside-down ACT palette "${file.name}" (0↔255).`);
+                }
                 const curActIdx = actBatchIndex++;
                 if (curActIdx === 0) {
                   setActPalette(paletteData);
@@ -5691,6 +5751,14 @@ export default function MugenStudio({
                                                     Unify SFF
                                                 </button>
                                                 <button 
+                                                    onClick={handleFlipActivePalette}
+                                                    className="p-1 px-2 bg-amber-900/30 border border-amber-500/30 hover:bg-amber-900/50 rounded text-[9px] text-amber-200 flex items-center gap-1 transition-all"
+                                                    title="Flip upside-down palette order (0↔255)"
+                                                >
+                                                    <FlipVertical size={10} />
+                                                    Flip 0↔255
+                                                </button>
+                                                <button 
                                                     onClick={() => {
                                                         const pal = effectivePalette;
                                                         if (!pal) return;
@@ -6015,6 +6083,14 @@ export default function MugenStudio({
                                 >
                                     <FolderOpen size={11} />
                                     Load ACT
+                                </button>
+                                <button
+                                    onClick={handleFlipActivePalette}
+                                    className="col-span-2 p-1.5 px-2.5 bg-amber-950/30 border border-amber-700/60 hover:bg-amber-900/40 rounded text-[10px] text-amber-300 font-bold flex items-center justify-center gap-1.5"
+                                    title="Flip upside-down palette indices (0↔255) if character appears completely black"
+                                >
+                                    <FlipVertical size={11} />
+                                    Flip Upside-Down Palette (0↔255)
                                 </button>
                             </div>
                         </div>

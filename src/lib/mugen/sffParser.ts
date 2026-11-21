@@ -110,15 +110,23 @@ export function parseSffBinary(buffer: ArrayBuffer): SffData {
 
   let globalPalette: Uint8Array | undefined;
   // SFF v1 global palette is 768 bytes at the VERY end, IF it exists.
-  // It only exists if there are 768 bytes left after the last subfile.
+  // It only exists if there are 768 bytes left after the last subfile and is not all-zero padding.
   if (view.byteLength >= lastSubfileEnd + 768) {
       const lastPalOffset = view.byteLength - 768;
-      globalPalette = new Uint8Array(1024);
+      let hasNonZeroRgb = false;
+      const candidate = new Uint8Array(1024);
       for (let i = 0; i < 256; i++) {
-          globalPalette[i * 4] = view.getUint8(lastPalOffset + i * 3);
-          globalPalette[i * 4 + 1] = view.getUint8(lastPalOffset + i * 3 + 1);
-          globalPalette[i * 4 + 2] = view.getUint8(lastPalOffset + i * 3 + 2);
-          globalPalette[i * 4 + 3] = i === 0 ? 0 : 255;
+          const r = view.getUint8(lastPalOffset + i * 3);
+          const g = view.getUint8(lastPalOffset + i * 3 + 1);
+          const b = view.getUint8(lastPalOffset + i * 3 + 2);
+          if (r !== 0 || g !== 0 || b !== 0) hasNonZeroRgb = true;
+          candidate[i * 4] = r;
+          candidate[i * 4 + 1] = g;
+          candidate[i * 4 + 2] = b;
+          candidate[i * 4 + 3] = i === 0 ? 0 : 255;
+      }
+      if (hasNonZeroRgb) {
+          globalPalette = candidate;
       }
   }
 
@@ -142,6 +150,14 @@ export function parseSffBinary(buffer: ArrayBuffer): SffData {
           }
       }
   });
+
+  // If all sprites were flagged shared without a trailing global pal, use the first embedded PCX palette
+  if (sffPalettes.length === 0) {
+      const firstEmbedded = images.find(img => img.palette);
+      if (firstEmbedded?.palette) {
+          sffPalettes.push({ group: 1, item: 1, data: firstEmbedded.palette });
+      }
+  }
 
   // Fallback global palette for rendering sprites that marked themselves as shared but didn't find a global pal
   if (!globalPalette && sffPalettes.length > 0) {
@@ -198,12 +214,21 @@ function parseSffV2(buffer: ArrayBuffer, view: DataView): SffData {
                 const rawPal = new Uint8Array(buffer, pOffset, pSize);
                 const paletteData = new Uint8Array(1024);
                 const bytesPerColor = pSize / 256;
+                let hasAnyNonZeroAlpha = false;
+                if (pSize === 1024 && !isV200) {
+                    for (let j = 1; j < 256; j++) {
+                        if (rawPal[j * 4 + 3] > 0) {
+                            hasAnyNonZeroAlpha = true;
+                            break;
+                        }
+                    }
+                }
 
                 for (let j = 0; j < 256; j++) {
                     paletteData[j * 4] = rawPal[j * bytesPerColor];
                     paletteData[j * 4 + 1] = rawPal[j * bytesPerColor + 1];
                     paletteData[j * 4 + 2] = rawPal[j * bytesPerColor + 2];
-                    if (pSize === 768 || isV200) {
+                    if (pSize === 768 || isV200 || !hasAnyNonZeroAlpha) {
                         paletteData[j * 4 + 3] = j === 0 ? 0 : 255;
                     } else {
                         paletteData[j * 4 + 3] = rawPal[j * 4 + 3];

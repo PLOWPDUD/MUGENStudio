@@ -1944,6 +1944,8 @@ export const SECONDARY_FALLBACK_KEYS: Record<string, string> = {
   z: 'a',
   x: 'x',
   c: 'c',
+  ' ': 's',
+  enter: 's',
 };
 
 export function loadStoredButtonSlots(): CustomButtonSlot[] {

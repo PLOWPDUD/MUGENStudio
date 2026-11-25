@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { X, Gamepad2, Eye, RotateCcw, Volume2, Search, Zap, Move, ArrowDown, CornerUpLeft, SlidersHorizontal, Keyboard, Swords, Shield, Cpu, Trophy, ChevronDown, ChevronUp, Palette } from 'lucide-react';
+import { X, Gamepad2, Eye, RotateCcw, Volume2, Search, Zap, Move, ArrowDown, CornerUpLeft, SlidersHorizontal, Keyboard, Swords, Shield, Cpu, Trophy, ChevronDown, ChevronUp, Palette, Sparkles } from 'lucide-react';
 import { applyPalette } from '../lib/mugen/actParser';
 import {
   getKeymapButtonsForPaletteIndex,
@@ -1969,6 +1969,8 @@ const SECONDARY_FALLBACK_KEYS: Record<string, string> = {
   z: 'a',
   x: 'x',
   c: 'c',
+  ' ': 's',
+  enter: 's',
 };
 
 function loadStoredButtonSlots(): CustomButtonSlot[] {
@@ -3252,6 +3254,11 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       return;
     }
 
+    if ((cmdLower === 's' || cmdLower === 'start' || cmdLower === 'taunt') && stance !== 'A' && (states[195] || airData?.actions[195])) {
+      triggerStateTransition(195, 'Taunt');
+      return;
+    }
+
     const baseOffset = stance === 'C' ? 400 : stance === 'A' ? 600 : 200;
     const btnMap: Record<string, number> = { x: 0, y: 10, z: 20, a: 30, b: 40, c: 50 };
     if (btnMap[cmdLower] !== undefined) {
@@ -3606,6 +3613,10 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
     if (canAttack && (modeRef.current === 'practice' || p1.ctrl === 1)) {
       const stance = stanceForCheck;
+      if (activeBtnSet.has('s') && stance !== 'A' && (states[195] || airData?.actions[195])) {
+        triggerStateTransition(195, 'Taunt');
+        return;
+      }
       const baseOffset = stance === 'C' ? 400 : stance === 'A' ? 600 : 200;
       const fallbackMap: Record<string, number> = { x: 0, y: 10, z: 20, a: 30, b: 40, c: 50 };
       const singleTok = Array.from(activeBtnSet).reverse().find(b => fallbackMap[b] !== undefined);
@@ -3955,8 +3966,11 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
     const onKeyUp = (e: KeyboardEvent) => {
       if (keyHandlersRef.current.listeningSlotId) return;
+      const activeTag = document.activeElement?.tagName;
+      if (activeTag === 'INPUT' || activeTag === 'SELECT' || activeTag === 'TEXTAREA') return;
       const token = keyHandlersRef.current.resolveTokenForKeyboardEvent(e.key);
       if (!token) return;
+      e.preventDefault();
       if (['B', 'F', 'U', 'D'].includes(token)) {
         keyHandlersRef.current.handleDirRelease(token);
       } else {
@@ -6054,7 +6068,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     return (
       <div className="flex flex-col items-center gap-2 select-none touch-none" onClick={e => e.stopPropagation()}>
         {/* Quick Movement / Stance Strip above Joystick */}
-        <div className="flex items-center gap-1 sm:gap-1.5">
+        <div className="flex flex-wrap items-center justify-center gap-1 sm:gap-1.5">
           <button
             type="button"
             onPointerDown={e => {
@@ -6062,7 +6076,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
               e.stopPropagation();
               triggerHopBack();
             }}
-            className="min-h-[36px] px-2 sm:px-3 py-1 rounded-xl bg-[#191922]/95 active:scale-95 hover:bg-[#252534] border border-amber-500/50 text-amber-200 text-[11px] sm:text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer touch-none"
+            className="min-h-[36px] px-2 sm:px-2.5 py-1 rounded-xl bg-[#191922]/95 active:scale-95 hover:bg-[#252534] border border-amber-500/50 text-amber-200 text-[11px] sm:text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer touch-none"
             title="Hop Back (State 105)"
           >
             <CornerUpLeft size={12} />
@@ -6075,7 +6089,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
               e.stopPropagation();
               toggleRunLock();
             }}
-            className={`min-h-[36px] px-2 sm:px-3 py-1 rounded-xl border text-[11px] sm:text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer active:scale-95 touch-none transition-colors ${
+            className={`min-h-[36px] px-2 sm:px-2.5 py-1 rounded-xl border text-[11px] sm:text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer active:scale-95 touch-none transition-colors ${
               runLocked
                 ? 'bg-indigo-600 border-indigo-300 text-white'
                 : 'bg-[#191922]/95 hover:bg-[#252534] border-indigo-500/50 text-indigo-200'
@@ -6092,7 +6106,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
               e.stopPropagation();
               toggleCrouchLock();
             }}
-            className={`min-h-[36px] px-2 sm:px-3 py-1 rounded-xl border text-[11px] sm:text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer active:scale-95 touch-none transition-colors ${
+            className={`min-h-[36px] px-2 sm:px-2.5 py-1 rounded-xl border text-[11px] sm:text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer active:scale-95 touch-none transition-colors ${
               crouchLocked
                 ? 'bg-cyan-600 border-cyan-300 text-white'
                 : 'bg-[#191922]/95 hover:bg-[#252534] border-cyan-500/50 text-cyan-200'
@@ -6101,6 +6115,21 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           >
             <ArrowDown size={12} />
             <span>{crouchLocked ? 'Crch ✓' : 'Crouch'}</span>
+          </button>
+          <button
+            type="button"
+            onPointerDown={e => onAttackPointerDown(e, 's')}
+            onPointerUp={onAttackPointerEnd}
+            onPointerCancel={onAttackPointerEnd}
+            className={`min-h-[36px] px-2 sm:px-2.5 py-1 rounded-xl border text-[11px] sm:text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer active:scale-95 touch-none transition-colors ${
+              heldAttackTokens.has('s')
+                ? 'bg-fuchsia-600 border-fuchsia-300 text-white'
+                : 'bg-[#191922]/95 hover:bg-[#252534] border-fuchsia-500/50 text-fuchsia-200'
+            }`}
+            title="Taunt (State 195 · Space / Enter)"
+          >
+            <Sparkles size={12} />
+            <span>Taunt</span>
           </button>
         </div>
 
@@ -6264,7 +6293,8 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
               {buttonSlots
                 .filter(b => b.kind === 'attack' && b.visible)
                 .map(b => `${formatKeyLabel(b.key)}(${b.label})`)
-                .join(' ')}
+                .join(' ')}{' '}
+              · Taunt: Space / Enter
             </p>
           </div>
         </div>

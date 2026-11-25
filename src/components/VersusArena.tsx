@@ -14,6 +14,7 @@ import {
   Shield,
   Shuffle,
   SlidersHorizontal,
+  Sparkles,
   Swords,
   Trash2,
   Trophy,
@@ -1398,6 +1399,10 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
 
     if (canAttack && p1.ctrl === 1) {
       const stance = stanceForCheck;
+      if (activeBtnSet.has('s') && stance !== 'A' && (states[195] || airData?.actions[195])) {
+        triggerP1StateTransition(195, 'Taunt');
+        return;
+      }
       const baseOffset = stance === 'C' ? 400 : stance === 'A' ? 600 : 200;
       const fallbackMap: Record<string, number> = { x: 0, y: 10, z: 20, a: 30, b: 40, c: 50 };
       const singleTok = Array.from(activeBtnSet).reverse().find(b => fallbackMap[b] !== undefined);
@@ -1700,8 +1705,11 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
 
     const onKeyUp = (e: KeyboardEvent) => {
       if (keyHandlersRef.current.listeningSlotId || keyHandlersRef.current.phase !== 'fight') return;
+      const activeTag = document.activeElement?.tagName;
+      if (activeTag === 'INPUT' || activeTag === 'SELECT' || activeTag === 'TEXTAREA') return;
       const token = keyHandlersRef.current.resolveTokenForKeyboardEvent(e.key);
       if (!token) return;
+      e.preventDefault();
       if (['B', 'F', 'U', 'D'].includes(token)) {
         keyHandlersRef.current.handleDirRelease(token);
       } else {
@@ -3644,7 +3652,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
     };
     return (
       <div className="flex flex-col items-center gap-2 select-none touch-none">
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center justify-center gap-1.5">
           <button
             type="button"
             onPointerDown={e => {
@@ -3652,7 +3660,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
               e.stopPropagation();
               triggerHopBack();
             }}
-            className="min-h-[40px] px-3 py-1 rounded-xl bg-[#191922] active:scale-95 hover:bg-[#252534] border border-amber-500/50 text-amber-200 text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer touch-none whitespace-nowrap"
+            className="min-h-[40px] px-2.5 sm:px-3 py-1 rounded-xl bg-[#191922] active:scale-95 hover:bg-[#252534] border border-amber-500/50 text-amber-200 text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer touch-none whitespace-nowrap"
           >
             <CornerUpLeft size={13} />
             <span>Hop</span>
@@ -3664,7 +3672,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
               e.stopPropagation();
               toggleRunLock();
             }}
-            className={`min-h-[40px] px-3 py-1 rounded-xl border text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer active:scale-95 touch-none transition-colors whitespace-nowrap ${
+            className={`min-h-[40px] px-2.5 sm:px-3 py-1 rounded-xl border text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer active:scale-95 touch-none transition-colors whitespace-nowrap ${
               runLocked
                 ? 'bg-indigo-600 border-indigo-300 text-white'
                 : 'bg-[#191922] hover:bg-[#252534] border-indigo-500/50 text-indigo-200'
@@ -3680,7 +3688,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
               e.stopPropagation();
               toggleCrouchLock();
             }}
-            className={`min-h-[40px] px-3 py-1 rounded-xl border text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer active:scale-95 touch-none transition-colors whitespace-nowrap ${
+            className={`min-h-[40px] px-2.5 sm:px-3 py-1 rounded-xl border text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer active:scale-95 touch-none transition-colors whitespace-nowrap ${
               crouchLocked
                 ? 'bg-cyan-600 border-cyan-300 text-white'
                 : 'bg-[#191922] hover:bg-[#252534] border-cyan-500/50 text-cyan-200'
@@ -3688,6 +3696,21 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
           >
             <ArrowDown size={13} />
             <span>{crouchLocked ? 'Crch ✓' : 'Crouch'}</span>
+          </button>
+          <button
+            type="button"
+            onPointerDown={e => onAttackPointerDown(e, 's')}
+            onPointerUp={onAttackPointerEnd}
+            onPointerCancel={onAttackPointerEnd}
+            title="Taunt (State 195 · Space / Enter)"
+            className={`min-h-[40px] px-2.5 sm:px-3 py-1 rounded-xl border text-xs font-bold flex items-center gap-1 shadow-lg cursor-pointer active:scale-95 touch-none transition-colors whitespace-nowrap ${
+              heldAttackTokens.has('s')
+                ? 'bg-fuchsia-600 border-fuchsia-300 text-white'
+                : 'bg-[#191922] hover:bg-[#252534] border-fuchsia-500/50 text-fuchsia-200'
+            }`}
+          >
+            <Sparkles size={13} />
+            <span>Taunt</span>
           </button>
         </div>
 
@@ -4723,6 +4746,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
                     .map(b => `${formatKeyLabel(b.key)}(${b.label})`)
                     .join(' ')}
                 </span>
+                <span>Taunt: Space / Enter</span>
               </div>
               {renderExternalActionPad(isLandscapeShort)}
             </div>

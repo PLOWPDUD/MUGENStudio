@@ -2835,6 +2835,9 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       f.moveHit = 0;
       f.moveGuarded = 0;
     }
+    if (!options?.asHitOrGuard) {
+      f.hitPauseTicks = 0;
+    }
     f.pendingLanding = false;
 
     if (targetState !== 100 && f.runLocked) {
@@ -2887,16 +2890,17 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
         targetState === 45 ||
         targetState === 50 ||
         targetState === 51;
+      const isCrouchCtrlState = targetState === 10 || targetState === 11 || targetState === 12;
       const defaultCtrl =
         targetState === 0 ||
-        targetState === 11 ||
+        isCrouchCtrlState ||
         targetState === 20 ||
         targetState === 21 ||
         isJumpCtrlState ||
         targetState === 100
           ? 1
           : 0;
-      f.ctrl = isJumpCtrlState ? 1 : (stateDef?.ctrlVal ?? defaultCtrl);
+      f.ctrl = isJumpCtrlState || targetState === 10 || targetState === 12 ? 1 : (stateDef?.ctrlVal ?? defaultCtrl);
 
       if (modeRef.current === 'fight' && stateDef?.powerAdd !== undefined) {
         f.power = Math.max(0, Math.min(f.maxPower, f.power + stateDef.powerAdd));
@@ -3082,7 +3086,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
   const triggerHopBack = () => {
     const p1 = p1Ref.current;
     if (modeRef.current === 'fight' && (fightOutcomeRef.current || p1.life <= 0 || p1.moveType === 'H')) return;
-    const nextLog = [...inputLogRef.current, 'B', 'B'].slice(-12);
+    const nextLog = [...inputLogRef.current, 'B', 'B'].slice(-16);
     inputLogRef.current = nextLog;
     setInputLog(nextLog);
     triggerStateTransition(105, 'Hop Back');
@@ -3136,7 +3140,8 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     activeBtns: Set<string>,
     stanceOverride?: 'S' | 'C' | 'A',
     ignoreStance?: boolean,
-    f: FighterRuntime = p1Ref.current
+    f: FighterRuntime = p1Ref.current,
+    ignorePower = false
   ): { matches: boolean; multiWeight: number } => {
     if (rule.requiresP2Close) {
       if (modeRef.current !== 'fight') return { matches: false, multiWeight: 0 };
@@ -3144,7 +3149,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       if (!opp || Math.abs(f.posX - opp.posX) > 65) return { matches: false, multiWeight: 0 };
     }
 
-    if (modeRef.current === 'fight' && rule.minPowerRequired > 0 && f.power < rule.minPowerRequired) {
+    if (!ignorePower && modeRef.current === 'fight' && rule.minPowerRequired > 0 && f.power < rule.minPowerRequired) {
       return { matches: false, multiWeight: 0 };
     }
 
@@ -3299,7 +3304,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           return;
         }
         if (token === 'F' && (states[100] || airData?.actions[100])) {
-          const runLog = [...inputLogRef.current, 'F', 'F'].slice(-12);
+          const runLog = [...inputLogRef.current, 'F', 'F'].slice(-16);
           inputLogRef.current = runLog;
           setInputLog(runLog);
           triggerStateTransition(100, 'Run Forward');
@@ -3325,7 +3330,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     ) {
       next = [...inputLogRef.current.slice(0, -1), token];
     } else {
-      next = [...inputLogRef.current, token].slice(-12);
+      next = [...inputLogRef.current, token].slice(-16);
     }
 
     inputLogRef.current = next;
@@ -3370,6 +3375,8 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       return allPresent ? pParts.length : 0;
     };
 
+    const DIR_TOKENS = new Set(['B', 'F', 'U', 'D', 'DF', 'DB', 'UF', 'UB']);
+    const DIAG_TOKENS = new Set(['DF', 'DB', 'UF', 'UB']);
     const matchesCommandPattern = (cleanTokens: string[]): number => {
       if (cleanTokens.length === 0) return 0;
       const lastMatchCount = matchFinalToken(cleanTokens[cleanTokens.length - 1]);
@@ -3382,14 +3389,71 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           return lastMatchCount;
         }
       }
-      const simplified = cleanTokens.filter(t => {
-        const u = t.toUpperCase();
-        return u !== 'DF' && u !== 'DB' && u !== 'UF' && u !== 'UB';
-      });
+      const simplified = cleanTokens.filter(t => !DIAG_TOKENS.has(t.toUpperCase()));
       if (simplified.length > 1 && simplified.length < cleanTokens.length && next.length >= simplified.length) {
         const tail = next.slice(next.length - simplified.length);
         if (simplified.slice(0, -1).every((p, idx) => matchHistToken(p, tail[idx]))) {
           return lastMatchCount;
+        }
+      }
+
+      // Forgiving ordered subsequence matching for multi-step motions (QCF, QCB, DP, HCF, 2xQCF, etc.)
+      // Keep 2-token inputs (e.g. F,F / B,B / F,x) exact to avoid accidental misfires.
+      const motionPat = cleanTokens.slice(0, -1);
+      if (motionPat.length >= 2) {
+        const isPureDirMotion = motionPat.every(t => DIR_TOKENS.has(t.toUpperCase()));
+        const histPool = next.slice(0, -1);
+        let recentPool: string[];
+        if (isPureDirMotion) {
+          let cutIdx = histPool.length;
+          const minIdx = Math.max(0, histPool.length - Math.max(14, motionPat.length + 6));
+          while (cutIdx > minIdx && DIR_TOKENS.has(histPool[cutIdx - 1].toUpperCase())) {
+            cutIdx--;
+          }
+          recentPool = histPool.slice(cutIdx);
+        } else {
+          recentPool = histPool.slice(-Math.max(14, motionPat.length + 6));
+        }
+
+        if (recentPool.length >= Math.max(2, motionPat.length - 2)) {
+          const lastPat = motionPat[motionPat.length - 1].toUpperCase();
+          const lastInp = recentPool[recentPool.length - 1].toUpperCase();
+          let endCompatible = true;
+          if (isPureDirMotion) {
+            if (lastPat === 'F' || lastPat === 'DF' || lastPat === 'UF') {
+              if (lastInp === 'B' || lastInp === 'DB' || lastInp === 'UB') endCompatible = false;
+            } else if (lastPat === 'B' || lastPat === 'DB' || lastPat === 'UB') {
+              if (lastInp === 'F' || lastInp === 'DF' || lastInp === 'UF') endCompatible = false;
+            } else if (lastPat === 'D') {
+              if (lastInp === 'U' || lastInp === 'UF' || lastInp === 'UB') endCompatible = false;
+            } else if (lastPat === 'U') {
+              if (lastInp === 'D' || lastInp === 'DF' || lastInp === 'DB') endCompatible = false;
+            }
+          }
+          if (endCompatible) {
+            const failed = new Set<number>();
+            const matchSubseq = (pi: number, ii: number): boolean => {
+              if (pi === motionPat.length) return true;
+              if (ii >= recentPool.length) return false;
+              const memoKey = pi * 32 + ii;
+              if (failed.has(memoKey)) return false;
+              const pUpper = motionPat[pi].toUpperCase();
+              if (matchHistToken(pUpper, recentPool[ii]) && matchSubseq(pi + 1, ii + 1)) {
+                return true;
+              }
+              if (DIAG_TOKENS.has(pUpper) && pi > 0 && pi < motionPat.length - 1 && matchSubseq(pi + 1, ii)) {
+                return true;
+              }
+              if (matchSubseq(pi, ii + 1)) {
+                return true;
+              }
+              failed.add(memoKey);
+              return false;
+            };
+            if (matchSubseq(0, 0)) {
+              return lastMatchCount;
+            }
+          }
         }
       }
       return 0;
@@ -3516,11 +3580,23 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       }
     }
 
-    // Check ctrl/chain cancel permissions in Fight Mode (allow cancels if moveContact > 0 or ctrl === 1 or upgrading a chord)
+    // Check ctrl/chain cancel permissions in Fight Mode (neutral states, hit/guard cancels, startup kara-cancels, chord upgrades)
+    const isNeutralGrounded =
+      p1.moveType === 'I' &&
+      (p1.stateNo === 0 ||
+        p1.stateNo === 10 ||
+        p1.stateNo === 11 ||
+        p1.stateNo === 12 ||
+        p1.stateNo === 20 ||
+        p1.stateNo === 21 ||
+        p1.stateNo === 100);
+    const isSpecialOrHyperStartup = p1.moveType === 'A' && p1.stateNo < 1000 && p1.stateTime <= 4;
     const canCancelMove =
       modeRef.current === 'practice' ||
       p1.ctrl === 1 ||
+      isNeutralGrounded ||
       p1.moveContact > 0 ||
+      isSpecialOrHyperStartup ||
       (activeBtnSet.size >= 2 && isUpgradeWindow);
 
     if (!canCancelMove) return;
@@ -3528,18 +3604,34 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     let bestCandidate: { rule: ParsedChangeStateRule; label: string; score: number; isMulti: boolean } | null = null;
     for (let rIdx = 0; rIdx < rules.length; rIdx++) {
       const rule = rules[rIdx];
+      const targetSt = states[rule.targetState];
+      const isTargetHyper = Boolean(targetSt?.isHyper || rule.targetState >= 3000);
+      const isTargetSpecial = Boolean(
+        targetSt?.category === 'special' || (rule.targetState >= 1000 && rule.targetState < 3000)
+      );
+      const isSpecialOrHyperRule = isTargetHyper || isTargetSpecial;
       const isAirChainCancel =
         p1.moveContact > 0 &&
         stanceForCheck === 'A' &&
         rule.targetState !== p1.stateNo &&
         (rule.allowedStateTypes.includes('A') ||
-          states[rule.targetState]?.stateType === 'A' ||
+          targetSt?.stateType === 'A' ||
           (rule.targetState >= 600 && rule.targetState < 700));
+      const isGroundSpecialOrHyperCancel =
+        p1.moveContact > 0 &&
+        rule.targetState !== p1.stateNo &&
+        ((isTargetHyper && !states[p1.stateNo]?.isHyper && p1.stateNo < 3000) ||
+          (isTargetSpecial && p1.stateNo < 1000) ||
+          (stanceForCheck === 'A' && isSpecialOrHyperRule));
+      const isSpecialOrHyperKara = isSpecialOrHyperStartup && isSpecialOrHyperRule;
       if (
         modeRef.current === 'fight' &&
         rule.requireCtrl &&
         p1.ctrl === 0 &&
+        !isNeutralGrounded &&
         !isAirChainCancel &&
+        !isGroundSpecialOrHyperCancel &&
+        !isSpecialOrHyperKara &&
         !(activeBtnSet.size >= 2 && isUpgradeWindow)
       ) {
         continue;
@@ -3568,15 +3660,17 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       const airBonus =
         stanceForCheck === 'A' &&
         (rule.allowedStateTypes.includes('A') ||
-          states[rule.targetState]?.stateType === 'A' ||
+          targetSt?.stateType === 'A' ||
           (rule.targetState >= 600 && rule.targetState < 700))
           ? 500
           : 0;
+      const hyperBonus = isTargetHyper ? 500 : 0;
       const score =
         effectiveChord * 10000 +
         bestTokenCount * 200 +
         bestChordWeight * 20 +
         airBonus +
+        hyperBonus +
         (rules.length - rIdx) * 0.001;
 
       if (!bestCandidate || score > bestCandidate.score) {
@@ -3599,10 +3693,31 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       return;
     }
 
+    let missingPowerReq = 0;
+    if (modeRef.current === 'fight') {
+      for (const rule of rules) {
+        if (rule.minPowerRequired > p1.power) {
+          const testRes = ruleMatchesCurrentContext(
+            rule,
+            satisfiedCmdNames,
+            activeBtnSet,
+            stanceForCheck,
+            false,
+            p1,
+            true
+          );
+          if (testRes.matches) {
+            missingPowerReq = Math.max(missingPowerReq, rule.minPowerRequired);
+          }
+        }
+      }
+    }
+
     const canAttack =
       p1.stateNo === 0 ||
       p1.stateNo === 10 ||
       p1.stateNo === 11 ||
+      p1.stateNo === 12 ||
       p1.stateNo === 20 ||
       p1.stateNo === 21 ||
       p1.stateNo === 100 ||
@@ -3611,7 +3726,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       p1.stateType === 'A' ||
       (p1.stateNo >= 40 && p1.stateNo <= 52);
 
-    if (canAttack && (modeRef.current === 'practice' || p1.ctrl === 1)) {
+    if (canAttack && (modeRef.current === 'practice' || p1.ctrl === 1 || isNeutralGrounded)) {
       const stance = stanceForCheck;
       if (activeBtnSet.has('s') && stance !== 'A' && (states[195] || airData?.actions[195])) {
         triggerStateTransition(195, 'Taunt');
@@ -3641,6 +3756,9 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           triggerStateTransition(st, `${stance === 'C' ? 'Crouch ' : stance === 'A' ? 'Air ' : ''}${singleTok.toUpperCase()}`);
         }
       }
+    }
+    if (missingPowerReq > 0) {
+      setMatchedMove(`Need ${missingPowerReq} Power (${Math.floor(p1.power)}/${missingPowerReq})`);
     }
   };
 
@@ -3726,7 +3844,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
         const rem = p1.heldDirs.has('F') ? 'F' : 'B';
         const remFacing = p1.facing === -1 ? (rem === 'F' ? 'B' : 'F') : rem;
         if (inputLogRef.current[inputLogRef.current.length - 1] !== remFacing) {
-          const next = [...inputLogRef.current, remFacing].slice(-12);
+          const next = [...inputLogRef.current, remFacing].slice(-16);
           inputLogRef.current = next;
           setInputLog(next);
         }
@@ -4541,7 +4659,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
         modeRef.current === 'fight' &&
         f.posY >= 270 &&
         f.ctrl === 1 &&
-        (f.stateNo === 0 || f.stateNo === 10 || f.stateNo === 11 || f.stateNo === 20 || f.stateNo === 21)
+        (f.stateNo === 0 || f.stateNo === 10 || f.stateNo === 11 || f.stateNo === 12 || f.stateNo === 20 || f.stateNo === 21)
       ) {
         if (opp.posX > f.posX + 5) f.facing = 1;
         else if (opp.posX < f.posX - 5) f.facing = -1;
@@ -6048,7 +6166,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     if (nextRun) {
       setCrouchLocked(false);
       p1Ref.current.crouchLocked = false;
-      const runLog = [...inputLogRef.current, 'F', 'F'].slice(-12);
+      const runLog = [...inputLogRef.current, 'F', 'F'].slice(-16);
       inputLogRef.current = runLog;
       setInputLog(runLog);
       triggerStateTransition(100, 'Run Forward');

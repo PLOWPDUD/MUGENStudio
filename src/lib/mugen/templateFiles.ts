@@ -1707,6 +1707,20 @@ st      = player.cns
 stcommon = common1.cns
 sprite  = player.sff
 anim    = player.air
+
+[Palette Keymap]
+x  = 1
+y  = 2
+z  = 3
+a  = 4
+b  = 5
+c  = 6
+x2 = 7
+y2 = 8
+z2 = 9
+a2 = 10
+b2 = 11
+c2 = 12
 `;
 
 export const templateCmd = `; The CMD file.

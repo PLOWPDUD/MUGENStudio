@@ -10,7 +10,9 @@ import {
   Github,
   Zap,
   Clock,
-  Trash2
+  Trash2,
+  Swords,
+  ArrowRight
 } from 'lucide-react';
 import { LanguagePicker } from './LanguagePicker';
 import { getAllProjects, deleteProject, deleteProjects, SavedProject } from '../lib/projectStorage';
@@ -20,6 +22,7 @@ interface HomeScreenProps {
   onOpenZip: (files: FileList) => void;
   onImportFolder: (files: FileList) => void;
   onOpenSavedProject: (project: SavedProject) => void;
+  onOpenPlayMode: () => void;
   onShowDocs: () => void;
 }
 
@@ -28,6 +31,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   onOpenZip, 
   onImportFolder,
   onOpenSavedProject,
+  onOpenPlayMode,
   onShowDocs
 }) => {
   const { t } = useTranslation();
@@ -87,6 +91,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
     if (e.target.files && e.target.files.length > 0) {
       onImportFolder(e.target.files);
     }
+    e.target.value = '';
   };
 
   return (
@@ -146,8 +151,13 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
           </motion.div>
         </header>
 
-        {/* Action Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-16">
+        {/* Part 1 · Create Studio Action Grid */}
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-xs font-semibold tracking-wide text-zinc-400">
+            Part 1 · Character Creation Studio
+          </h3>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
           <ActionCard 
             title={t('home.newCharacter.title')}
             description={t('home.newCharacter.description')}
@@ -171,6 +181,50 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
             delay={0.4}
           />
         </div>
+
+        {/* Part 2 · Playable Versus Arena */}
+        <motion.section
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.45 }}
+          className="mb-16 rounded-3xl border border-emerald-500/30 bg-zinc-900/75 p-6 md:p-8 flex flex-col md:flex-row items-start md:items-center justify-between gap-6"
+        >
+          <div className="flex items-start gap-5">
+            <div className="w-14 h-14 rounded-2xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center text-emerald-300 shrink-0">
+              <Swords className="w-7 h-7" />
+            </div>
+            <div>
+              <p className="text-xs font-medium text-emerald-400 mb-1">
+                Part 2 · Playable Battle Engine
+              </p>
+              <h3 className="text-2xl font-bold tracking-tight text-white mb-2">
+                Versus Battle Arena (1v1 to 4v4)
+              </h3>
+              <p className="text-sm text-zinc-400 max-w-2xl leading-relaxed mb-3">
+                Import custom MUGEN characters or battle with your saved studio creations. Control P1 directly while fighting P2 CPU teams with distinct characters per slot, full CNS stats, specials, projectiles, helpers, and sound effects.
+              </p>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
+                <span>1v1 / 2v2 / 3v3 / 4v4</span>
+                <span aria-hidden="true" className="text-zinc-600">·</span>
+                <span>P1 vs Selected P2</span>
+                <span aria-hidden="true" className="text-zinc-600">·</span>
+                <span>Multi-Character ZIP &amp; File Import</span>
+                <span aria-hidden="true" className="text-zinc-600">·</span>
+                <span>Infinite Time &amp; Mobile Pad</span>
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onOpenPlayMode}
+            className="px-6 py-3.5 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-sm flex items-center gap-2.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 shadow-lg shadow-emerald-500/20"
+          >
+            <Swords className="w-4 h-4" />
+            Play Battle Arena
+            <ArrowRight className="w-4 h-4" />
+          </button>
+        </motion.section>
 
         {/* Saved Projects & Auto-Saves */}
         {savedProjects.length > 0 && (

@@ -209,3 +209,136 @@ export function updateIniTextField(
   return appended;
 }
 
+export const PALETTE_KEYMAP_KEYS = [
+  'x',
+  'y',
+  'z',
+  'a',
+  'b',
+  'c',
+  'x2',
+  'y2',
+  'z2',
+  'a2',
+  'b2',
+  'c2',
+] as const;
+
+export type PaletteKeyName = (typeof PALETTE_KEYMAP_KEYS)[number];
+export type PaletteKeymap = Record<PaletteKeyName, number>;
+
+export const DEFAULT_KFM_PALETTE_KEYMAP: PaletteKeymap = {
+  x: 1,
+  y: 2,
+  z: 3,
+  a: 4,
+  b: 5,
+  c: 6,
+  x2: 7,
+  y2: 8,
+  z2: 9,
+  a2: 10,
+  b2: 11,
+  c2: 12,
+};
+
+/**
+ * Parses [Palette Keymap] from a character .def INI structure,
+ * falling back to standard Kung Fu Man (KFM) defaults for omitted keys.
+ */
+export function parsePaletteKeymap(
+  data: Record<string, Record<string, string>> | null | undefined
+): PaletteKeymap {
+  const keymap: PaletteKeymap = { ...DEFAULT_KFM_PALETTE_KEYMAP };
+  if (!data) return keymap;
+
+  for (const [sec, fields] of Object.entries(data)) {
+    if (stripIniSuffix(sec).toLowerCase() !== 'palette keymap') continue;
+    for (const k of PALETTE_KEYMAP_KEYS) {
+      const rawVal = getSectionKeyValue(fields, k);
+      if (!rawVal) continue;
+      const parsed = parseInt(rawVal.trim(), 10);
+      if (Number.isFinite(parsed) && parsed >= 1) {
+        keymap[k] = Math.min(12, Math.max(1, parsed));
+      }
+    }
+  }
+  return keymap;
+}
+
+/**
+ * Parses [Info] pal.defaults (comma-separated 1-based palette slot numbers like "6,3,4,2").
+ */
+export function parsePalDefaults(
+  data: Record<string, Record<string, string>> | null | undefined
+): number[] {
+  const raw = getIniField(data, 'Info', 'pal.defaults');
+  if (!raw) return [1];
+  const nums = raw
+    .split(/[,\s]+/)
+    .map(part => parseInt(part.trim(), 10))
+    .filter(n => Number.isFinite(n) && n >= 1 && n <= 12);
+  return nums.length > 0 ? nums : [1];
+}
+
+/**
+ * Extracts 1-based [Files] pal1..pal12 references normalized to lowercase slash paths.
+ */
+export function parseDefPalFiles(
+  data: Record<string, Record<string, string>> | null | undefined
+): Record<number, string> {
+  const map: Record<number, string> = {};
+  if (!data) return map;
+  for (let slot = 1; slot <= 12; slot++) {
+    const raw = getIniField(data, 'Files', `pal${slot}`);
+    if (raw) {
+      const cleaned = raw.trim().replace(/^"|"$/g, '').replace(/\\/g, '/').toLowerCase();
+      if (cleaned) map[slot] = cleaned;
+    }
+  }
+  return map;
+}
+
+/**
+ * Resolves a 1-based MUGEN palette number (pal1..pal12) to a 0-based index in palettes[].
+ * Optionally accepts body-only indices so wrap-around never falls onto group >= 7000 portrait/FX palettes.
+ */
+export function resolvePaletteSlotIndex(
+  palNum1Based: number,
+  totalPalettes: number,
+  palSlotIndices?: Record<number, number>,
+  fallbackIndices?: number[]
+): number {
+  if (totalPalettes <= 0) return 0;
+  const clampedPal = Math.max(1, Math.round(palNum1Based));
+  if (palSlotIndices && typeof palSlotIndices[clampedPal] === 'number') {
+    const idx = palSlotIndices[clampedPal];
+    if (idx >= 0 && idx < totalPalettes) return idx;
+  }
+  if (fallbackIndices && fallbackIndices.length > 0) {
+    return fallbackIndices[(clampedPal - 1) % fallbackIndices.length];
+  }
+  return (clampedPal - 1) % totalPalettes;
+}
+
+/**
+ * Returns the keymap button names (e.g. ['x'], ['a']) mapped to a given 0-based palette index.
+ */
+export function getKeymapButtonsForPaletteIndex(
+  paletteIdx: number,
+  keymap: PaletteKeymap,
+  totalPalettes: number,
+  palSlotIndices?: Record<number, number>,
+  fallbackIndices?: number[]
+): PaletteKeyName[] {
+  const hits: PaletteKeyName[] = [];
+  for (const key of PALETTE_KEYMAP_KEYS) {
+    const targetIdx = resolvePaletteSlotIndex(keymap[key], totalPalettes, palSlotIndices, fallbackIndices);
+    if (targetIdx === paletteIdx) {
+      hits.push(key);
+    }
+  }
+  return hits;
+}
+
+

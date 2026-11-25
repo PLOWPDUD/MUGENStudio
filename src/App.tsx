@@ -2,10 +2,11 @@ import { StrictMode, useState } from 'react';
 import MugenStudio from './components/MugenStudio';
 import HomeScreen from './components/HomeScreen';
 import Documentation from './components/Documentation';
+import { VersusArena } from './components/VersusArena';
 import { AnimatePresence } from 'motion/react';
 
 export default function App() {
-  const [view, setView] = useState<'home' | 'editor'>('home');
+  const [view, setView] = useState<'home' | 'editor' | 'play'>('home');
   const [initialData, setInitialData] = useState<any>(null);
   const [showDocs, setShowDocs] = useState(false);
 
@@ -37,8 +38,11 @@ export default function App() {
           onOpenZip={handleOpenZip}
           onImportFolder={handleImportFolder}
           onOpenSavedProject={handleOpenSavedProject}
+          onOpenPlayMode={() => setView('play')}
           onShowDocs={() => setShowDocs(true)}
         />
+      ) : view === 'play' ? (
+        <VersusArena onBackToHome={() => setView('home')} />
       ) : (
         <MugenStudio 
           key={initialData?.timestamp}

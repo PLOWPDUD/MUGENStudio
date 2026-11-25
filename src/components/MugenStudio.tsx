@@ -8,13 +8,30 @@ import {
   Pipette, Crop, FlipHorizontal, FlipVertical, Layers, Film, Gamepad2, AlertTriangle, CheckCircle2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight
 } from 'lucide-react';
 import JSZip from 'jszip';
-import { parseIniString, stringifyIni, getIniField, getSectionKeyValue, stripIniSuffix, updateIniTextField } from '../lib/mugen/defParser';
+import {
+  DEFAULT_KFM_PALETTE_KEYMAP,
+  getIniField,
+  getKeymapButtonsForPaletteIndex,
+  getSectionKeyValue,
+  PALETTE_KEYMAP_KEYS,
+  PaletteKeyName,
+  parseDefPalFiles,
+  parseIniString,
+  parsePalDefaults,
+  parsePaletteKeymap,
+  resolvePaletteSlotIndex,
+  stringifyIni,
+  stripIniSuffix,
+  updateIniTextField,
+} from '../lib/mugen/defParser';
+import { getPaletteSwatchColor } from '../lib/mugen/characterLoader';
+import { palettesAreSame } from '../lib/mugen/combatEngine';
 import { parseSffBinary, extractPortraits } from '../lib/mugen/sffParser';
 import { generateTemplateSff, buildSffBinary } from '../lib/mugen/sffGenerator';
 import { templateAir, templateCmd, templateCns, templateDef } from '../lib/mugen/templateFiles';
 import { parseActBinary, applyPalette, imageToSpriteIndices, reversePalette, detectAndFixUpsideDownPalette } from '../lib/mugen/actParser';
 import { parseAirString, serializeAirData } from '../lib/mugen/airParser';
-import type { SffData, AirData } from '../lib/mugen/types';
+import type { SffData, AirData, AirAction, AirElement } from '../lib/mugen/types';
 import { parseSndBinary, buildSndBinary } from '../lib/mugen/sndParser';
 import type { SndSound, SndData } from '../lib/mugen/sndParser';
 import { LanguagePicker } from './LanguagePicker';
@@ -22,6 +39,7 @@ import { saveProject, SavedProject } from '../lib/projectStorage';
 import { MugenCodeEditor, MugenCodeEditorHandle } from './MugenCodeEditor';
 import { SoundWaveform } from './SoundWaveform';
 import { MoveTesterModal } from './MoveTesterModal';
+import { AirTimelineStrip, AirStoryboardVisualizer, getActionTimingStats } from './AirVisualizer';
 import { exportActionGif, exportActionSpriteSheet } from '../lib/mugen/gifEncoder';
 import { validateMugenProject, MugenIssue } from '../lib/mugen/validator';
 
@@ -662,6 +680,8 @@ export default function MugenStudio({
   const [selectedClsn, setSelectedClsn] = useState<{type: 1 | 2, id: number} | null>(null);
   const paletteActInputRef = useRef<HTMLInputElement>(null);
   const renderAreaRef = useRef<HTMLDivElement>(null);
+  const initialFilesLoadedRef = useRef(false);
+  const uploadSeqRef = useRef(0);
   const [currentFrame, setCurrentFrame] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
@@ -681,6 +701,45 @@ export default function MugenStudio({
   const [newActionNameText, setNewActionNameText] = useState('');
   const [pickerSearch, setPickerSearch] = useState('');
 
+  const studioPaletteKeymap = useMemo(() => parsePaletteKeymap(iniData), [iniData]);
+  const studioPalSlotIndices = useMemo(() => {
+    const map: Record<number, number> = {};
+    const pals = sffData?.palettes || [];
+    for (let i = 0; i < pals.length; i++) {
+      const p = pals[i];
+      if (p.group === 1 && p.item >= 1 && p.item <= 12 && map[p.item] === undefined) {
+        map[p.item] = i;
+      }
+    }
+    for (let i = 0; i < pals.length; i++) {
+      const p = pals[i];
+      if (p.group === 0 && p.item >= 1 && p.item <= 12 && map[p.item] === undefined) {
+        map[p.item] = i;
+      }
+    }
+    if (Object.keys(map).length === 0) {
+      let slot = 1;
+      for (let i = 0; i < pals.length && slot <= 12; i++) {
+        if (pals[i].group < 7000) {
+          map[slot++] = i;
+        }
+      }
+    }
+    return map;
+  }, [sffData]);
+
+  const studioBodyPalIndices = useMemo(() => {
+    const pals = sffData?.palettes || [];
+    const indices = pals.map((p, i) => (p.group < 7000 ? i : -1)).filter(i => i >= 0);
+    return indices.length > 0 ? indices : pals.map((_, i) => i);
+  }, [sffData]);
+
+  const handleSelectStudioPaletteIdx = (idx: number) => {
+    setSelectedPaletteIdx(idx);
+    const pal = sffData?.palettes?.[idx]?.data;
+    if (pal) setActPalette(pal);
+  };
+
   // Palette Range HSL states
   const [palRangeFrom, setPalRangeFrom] = useState<number>(1);
   const [palRangeTo, setPalRangeTo] = useState<number>(255);
@@ -688,10 +747,11 @@ export default function MugenStudio({
   const [palSat, setPalSat] = useState<number>(0);
   const [palLight, setPalLight] = useState<number>(0);
 
-  // Bottom Panel & Move Tester states
+  // Bottom Panel, Move Tester & AIR Visualizer states
   const [activeBottomTab, setActiveBottomTab] = useState<'issues' | 'search' | 'output'>('issues');
   const [engineLogs, setEngineLogs] = useState<string[]>([]);
   const [showMoveTester, setShowMoveTester] = useState(false);
+  const [showAirVisualizer, setShowAirVisualizer] = useState(false);
 
   const appendEngineLog = (msg: string) => {
     const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -820,6 +880,14 @@ export default function MugenStudio({
         }
         if (deserialized.sndData) setSndData(deserialized.sndData);
         if (deserialized.actPalette) setActPalette(deserialized.actPalette);
+        const savedPals = deserialized.sffData?.palettes || [];
+        if (savedPals.length > 0) {
+          const matchedSavedIdx = deserialized.actPalette
+            ? savedPals.findIndex(p => p.group < 7000 && palettesAreSame(p.data, deserialized.actPalette!))
+            : -1;
+          const firstBodyIdx = savedPals.findIndex(p => p.group < 7000);
+          setSelectedPaletteIdx(matchedSavedIdx >= 0 ? matchedSavedIdx : Math.max(0, firstBodyIdx));
+        }
         setProjectId(deserialized.id);
         setHistory([{ sff: deserialized.sffData, air: loadedAir }]);
         setHistoryIndex(0);
@@ -829,8 +897,10 @@ export default function MugenStudio({
       }
     }
 
-    // If we have initial files, process them immediately
+    // If we have initial files, process them once (guarding React StrictMode double-mount)
     if (initialFiles && initialFiles.length > 0) {
+      if (initialFilesLoadedRef.current) return;
+      initialFilesLoadedRef.current = true;
       handleFileUpload({ target: { files: initialFiles } } as any);
       return;
     }
@@ -888,6 +958,7 @@ export default function MugenStudio({
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (showMoveTester) return;
       // Don't trigger shortcuts if in a text field
       if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') {
         return;
@@ -991,7 +1062,7 @@ export default function MugenStudio({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo, activeMode, activeTool, sffData, airData, spriteClipboard, clsnClipboard, selectionRect, objectClipboard, pastedContent, selectedSpriteIdx]);
+  }, [showMoveTester, undo, redo, activeMode, activeTool, sffData, airData, spriteClipboard, clsnClipboard, selectionRect, objectClipboard, pastedContent, selectedSpriteIdx]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -1162,8 +1233,9 @@ export default function MugenStudio({
         };
     }
 
-    const nextPalettes = [...(baseSff.palettes || [])];
-    
+    let nextPalettes = [...(baseSff.palettes || [])];
+    let lastAddedPalData: Uint8Array | null = null;
+
     for (const file of files) {
         try {
             const buffer = await (file as any).arrayBuffer();
@@ -1172,20 +1244,15 @@ export default function MugenStudio({
             if (wasFlipped) {
                 appendEngineLog(`Auto-flipped upside-down palette "${(file as any).name}" (0↔255).`);
             }
-            
-            // Also set as the immediate active palette for rendering
-            setActPalette(paletteData);
 
-            let nextGroup = 1;
-            let nextItem = 1;
-            if (nextPalettes.length > 0) {
-                const lastPal = nextPalettes[nextPalettes.length - 1];
-                nextGroup = lastPal.group;
-                nextItem = lastPal.item + 1;
-            }
+            setActPalette(paletteData);
+            lastAddedPalData = paletteData;
+
+            const bodyItems = nextPalettes.filter(p => p.group === 1).map(p => p.item);
+            const nextItem = bodyItems.length > 0 ? Math.max(...bodyItems) + 1 : 1;
 
             nextPalettes.push({
-                group: nextGroup,
+                group: 1,
                 item: nextItem,
                 data: paletteData
             });
@@ -1194,19 +1261,34 @@ export default function MugenStudio({
         }
     }
 
+    nextPalettes.sort((a, b) => {
+      const aPort = a.group >= 7000 ? 1 : 0;
+      const bPort = b.group >= 7000 ? 1 : 0;
+      if (aPort !== bPort) return aPort - bPort;
+      return (a.group - b.group) || (a.item - b.item);
+    });
+
     const nextSff = {
         ...baseSff,
         palettes: nextPalettes
     };
+    sffDataRef.current = nextSff;
     setSffData(nextSff);
-    setSelectedPaletteIdx(nextPalettes.length - 1);
+    const addedIdx = lastAddedPalData ? nextPalettes.findIndex(p => p.data === lastAddedPalData) : -1;
+    setSelectedPaletteIdx(addedIdx >= 0 ? addedIdx : Math.max(0, nextPalettes.length - 1));
     pushToHistory(nextSff);
     if (paletteActInputRef.current) paletteActInputRef.current.value = '';
   };
 
   const handleFlipActivePalette = () => {
     const sprite = sffData?.images?.[selectedSpriteIdx];
-    const hasCustomSpritePal = Boolean(sprite && sprite.isSharedPalette === false && sprite.palette);
+    const hasCustomSpritePal = Boolean(
+      sprite &&
+      sprite.group >= 7000 &&
+      !(sprite.group === 9000 && sprite.image === 0) &&
+      sprite.isSharedPalette === false &&
+      sprite.palette
+    );
     const activePal = hasCustomSpritePal
       ? sprite?.palette
       : (sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette || sprite?.palette);
@@ -1880,6 +1962,7 @@ export default function MugenStudio({
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
+    const uploadSeq = ++uploadSeqRef.current;
 
     interface ImportEntry {
       name: string;
@@ -1924,30 +2007,107 @@ export default function MugenStudio({
 
     if (collectedEntries.length === 0) return;
 
-    // Parse .def first so we know target anim/sprite/sound/pal filenames, then sff before act so palettes attach cleanly
+    if (!sffDataRef.current && sffData) {
+      sffDataRef.current = sffData;
+    }
+
+    // Parse primary character .def first so we know target sprite/anim/sound/pal filenames (and skip intro.def/ending.def storyboards)
+    let targetSffFile = '';
     let targetAnimFile = '';
+    let targetSndFile = '';
+    let defPalDefaults: number[] = [1];
     const defPalOrder: string[] = [];
-    const defEntries = collectedEntries.filter(f => f.name.split('.').pop()?.toLowerCase() === 'def');
-    const sffEntries = collectedEntries.filter(f => f.name.split('.').pop()?.toLowerCase() === 'sff');
+    const defPalSlotByBasename: Record<string, number[]> = {};
+    const defEntriesAll = collectedEntries.filter(f => f.name.split('.').pop()?.toLowerCase() === 'def');
+    const sffEntriesAll = collectedEntries.filter(f => f.name.split('.').pop()?.toLowerCase() === 'sff');
     const actEntriesRaw = collectedEntries.filter(f => f.name.split('.').pop()?.toLowerCase() === 'act');
-    const restEntries = collectedEntries.filter(f => {
+    const restEntriesAll = collectedEntries.filter(f => {
       const e = f.name.split('.').pop()?.toLowerCase();
       return e !== 'def' && e !== 'sff' && e !== 'act';
     });
 
-    if (defEntries.length > 0) {
-      try {
-        const previewDefText = await defEntries[0].text();
-        const previewDef = parseIniString(previewDefText);
-        for (let pi = 1; pi <= 12; pi++) {
-          const pField = getIniField(previewDef, 'Files', `pal${pi}`);
-          if (pField) {
-            const pBase = pField.split(/[/\\]/).pop()?.trim().toLowerCase();
-            if (pBase && !defPalOrder.includes(pBase)) defPalOrder.push(pBase);
+    let chosenDefEntry = defEntriesAll[0];
+    if (defEntriesAll.length > 0) {
+      let bestScore = -1;
+      for (const candidateDef of defEntriesAll) {
+        try {
+          const text = await candidateDef.text();
+          const parsed = parseIniString(text);
+          const hasFilesSprite = Boolean(getIniField(parsed, 'Files', 'sprite'));
+          const hasFilesCnsOrCmd = Boolean(getIniField(parsed, 'Files', 'cns') || getIniField(parsed, 'Files', 'cmd'));
+          const baseLower = candidateDef.name.replace(/\.def$/i, '').toLowerCase();
+          const isStoryboardName = baseLower === 'intro' || baseLower === 'ending' || baseLower === 'storyboard';
+          const score = (hasFilesSprite ? 4 : 0) + (hasFilesCnsOrCmd ? 4 : 0) + (!isStoryboardName ? 2 : 0);
+          if (score > bestScore) {
+            bestScore = score;
+            chosenDefEntry = candidateDef;
+          }
+        } catch {}
+      }
+
+      if (chosenDefEntry) {
+        try {
+          const previewDefText = await chosenDefEntry.text();
+          const previewDef = parseIniString(previewDefText);
+          const sprRef = getIniField(previewDef, 'Files', 'sprite');
+          const animRef = getIniField(previewDef, 'Files', 'anim');
+          const sndRef = getIniField(previewDef, 'Files', 'sound');
+          if (sprRef) targetSffFile = sprRef.split(/[/\\]/).pop()?.trim().toLowerCase() || '';
+          if (animRef) targetAnimFile = animRef.split(/[/\\]/).pop()?.trim().toLowerCase() || '';
+          if (sndRef) targetSndFile = sndRef.split(/[/\\]/).pop()?.trim().toLowerCase() || '';
+          const defPalMap = parseDefPalFiles(previewDef);
+          defPalDefaults = parsePalDefaults(previewDef);
+          for (let pi = 1; pi <= 12; pi++) {
+            const pField = defPalMap[pi];
+            if (pField) {
+              const pBase = pField.split('/').pop()?.trim().toLowerCase();
+              if (pBase) {
+                if (!defPalOrder.includes(pBase)) defPalOrder.push(pBase);
+                if (!defPalSlotByBasename[pBase]) defPalSlotByBasename[pBase] = [];
+                defPalSlotByBasename[pBase].push(pi);
+              }
+            }
+          }
+        } catch {}
+      }
+    } else if (iniData) {
+      const sprRef = getIniField(iniData, 'Files', 'sprite');
+      const animRef = getIniField(iniData, 'Files', 'anim');
+      const sndRef = getIniField(iniData, 'Files', 'sound');
+      if (sprRef) targetSffFile = sprRef.split(/[/\\]/).pop()?.trim().toLowerCase() || '';
+      if (animRef) targetAnimFile = animRef.split(/[/\\]/).pop()?.trim().toLowerCase() || '';
+      if (sndRef) targetSndFile = sndRef.split(/[/\\]/).pop()?.trim().toLowerCase() || '';
+      const defPalMap = parseDefPalFiles(iniData);
+      defPalDefaults = parsePalDefaults(iniData);
+      for (let pi = 1; pi <= 12; pi++) {
+        const pField = defPalMap[pi];
+        if (pField) {
+          const pBase = pField.split('/').pop()?.trim().toLowerCase();
+          if (pBase) {
+            if (!defPalOrder.includes(pBase)) defPalOrder.push(pBase);
+            if (!defPalSlotByBasename[pBase]) defPalSlotByBasename[pBase] = [];
+            defPalSlotByBasename[pBase].push(pi);
           }
         }
-      } catch {}
+      }
     }
+
+    if (uploadSeqRef.current !== uploadSeq) return;
+
+    const defEntries = chosenDefEntry ? [chosenDefEntry] : defEntriesAll;
+    const matchedTargetSff = targetSffFile
+      ? sffEntriesAll.find(f => (f.name.split(/[/\\]/).pop()?.toLowerCase() || '') === targetSffFile)
+      : undefined;
+    const sffEntries = matchedTargetSff ? [matchedTargetSff] : sffEntriesAll;
+
+    const restEntries = restEntriesAll.filter(f => {
+      const ext = f.name.split('.').pop()?.toLowerCase();
+      if (ext === 'snd' && targetSndFile) {
+        const hasMatch = restEntriesAll.some(r => (r.name.split(/[/\\]/).pop()?.toLowerCase() || '') === targetSndFile);
+        if (hasMatch) return (f.name.split(/[/\\]/).pop()?.toLowerCase() || '') === targetSndFile;
+      }
+      return true;
+    });
 
     const actEntries = [...actEntriesRaw].sort((a, b) => {
       const aName = a.name.split(/[/\\]/).pop()?.toLowerCase() || '';
@@ -2007,17 +2167,18 @@ export default function MugenStudio({
                 if (parsed.palettes && parsed.palettes.length > 0) {
                   let anyFlipped = false;
                   const fixedPalettes = parsed.palettes.map(pal => {
+                    if (pal.group >= 7000) return pal;
                     const res = detectAndFixUpsideDownPalette(pal.data, parsed.images);
                     if (res.wasFlipped) anyFlipped = true;
                     return res.wasFlipped ? { ...pal, data: res.palette } : pal;
                   });
                   if (anyFlipped) {
-                    const fallbackFixed = fixedPalettes[0]?.data;
+                    const fallbackFixed = fixedPalettes.find(p => p.group < 7000)?.data || fixedPalettes[0]?.data;
                     parsed = {
                       ...parsed,
                       palettes: fixedPalettes,
                       images: parsed.images.map(img =>
-                        img.isSharedPalette && fallbackFixed ? { ...img, palette: fallbackFixed } : img
+                        img.group < 7000 && img.isSharedPalette && fallbackFixed ? { ...img, palette: fallbackFixed } : img
                       ),
                     };
                     appendEngineLog(`Auto-flipped upside-down SFF palette in "${file.name}" (0↔255).`);
@@ -2048,33 +2209,42 @@ export default function MugenStudio({
                   appendEngineLog(`Auto-flipped upside-down ACT palette "${file.name}" (0↔255).`);
                 }
                 const curActIdx = actBatchIndex++;
-                if (curActIdx === 0) {
+                const actBaseName = file.name.split(/[/\\]/).pop()?.trim().toLowerCase() || '';
+                const explicitSlots = defPalSlotByBasename[actBaseName];
+                if (curActIdx === 0 || (explicitSlots && explicitSlots.includes(1))) {
                   setActPalette(paletteData);
                   setSelectedPaletteIdx(0);
                 }
 
-                // Add every distinct .act palette slot (1,1), (1,2), ... to SFF palettes
-                setSffData(prev => {
-                    if (!prev) return prev;
-                    const nextPalettes = [...(prev.palettes || [])];
-                    if (curActIdx === 0) {
-                      const existingIdx = nextPalettes.findIndex(p => p.group === 1 && p.item === 1);
-                      if (existingIdx >= 0) {
-                        nextPalettes[existingIdx] = { ...nextPalettes[existingIdx], data: paletteData };
-                      } else {
-                        nextPalettes.unshift({ group: 1, item: 1, data: paletteData });
-                      }
-                    } else {
-                      const targetItem = curActIdx + 1;
-                      const existingIdx = nextPalettes.findIndex(p => p.group === 1 && p.item === targetItem);
-                      if (existingIdx >= 0) {
-                        nextPalettes[existingIdx] = { ...nextPalettes[existingIdx], data: paletteData };
-                      } else {
-                        nextPalettes.push({ group: 1, item: targetItem, data: paletteData });
-                      }
+                // Add every .act palette slot matching .def pal1..pal12 (or sequential fallback)
+                const baseSff = sffDataRef.current;
+                if (baseSff) {
+                  let nextPalettes = [...(baseSff.palettes || [])];
+                  const targetItems = explicitSlots && explicitSlots.length > 0 ? explicitSlots : [curActIdx + 1];
+                  for (const targetItem of targetItems) {
+                    let existingIdx = nextPalettes.findIndex(p => p.group === 1 && p.item === targetItem);
+                    if (existingIdx < 0) {
+                      existingIdx = nextPalettes.findIndex(p => p.group === 0 && p.item === targetItem);
                     }
-                    return { ...prev, palettes: nextPalettes };
-                });
+                    if (existingIdx >= 0) {
+                      nextPalettes[existingIdx] = { ...nextPalettes[existingIdx], group: 1, item: targetItem, data: paletteData };
+                    } else {
+                      nextPalettes.push({ group: 1, item: targetItem, data: paletteData });
+                    }
+                  }
+                  if (nextPalettes.some(p => p.group === 1 && p.item === 1)) {
+                    nextPalettes = nextPalettes.filter(p => !(p.group === 0 && p.item === 0));
+                  }
+                  nextPalettes.sort((a, b) => {
+                    const aPort = a.group >= 7000 ? 1 : 0;
+                    const bPort = b.group >= 7000 ? 1 : 0;
+                    if (aPort !== bPort) return aPort - bPort;
+                    return (a.group - b.group) || (a.item - b.item);
+                  });
+                  const updatedSff = { ...baseSff, palettes: nextPalettes };
+                  sffDataRef.current = updatedSff;
+                  setSffData(updatedSff);
+                }
             } else if (ext === 'air') {
                 const matchesDefAnim = targetAnimFile && file.name.toLowerCase() === targetAnimFile;
                 if (airLoadedFromDefTarget && !matchesDefAnim) {
@@ -2126,6 +2296,42 @@ export default function MugenStudio({
         }
     }
     
+    if (uploadSeqRef.current !== uploadSeq) return;
+
+    const finalPals = sffDataRef.current?.palettes || [];
+    if (finalPals.length > 0 && (sffEntries.length > 0 || actEntries.length > 0 || chosenDefEntry)) {
+      const slotMap: Record<number, number> = {};
+      for (let i = 0; i < finalPals.length; i++) {
+        const p = finalPals[i];
+        if (p.group === 1 && p.item >= 1 && p.item <= 12 && slotMap[p.item] === undefined) {
+          slotMap[p.item] = i;
+        }
+      }
+      for (let i = 0; i < finalPals.length; i++) {
+        const p = finalPals[i];
+        if (p.group === 0 && p.item >= 1 && p.item <= 12 && slotMap[p.item] === undefined) {
+          slotMap[p.item] = i;
+        }
+      }
+      if (Object.keys(slotMap).length === 0) {
+        let slot = 1;
+        for (let i = 0; i < finalPals.length && slot <= 12; i++) {
+          if (finalPals[i].group < 7000) slotMap[slot++] = i;
+        }
+      }
+      const bodyIndices = finalPals.map((p, i) => (p.group < 7000 ? i : -1)).filter(i => i >= 0);
+      const preferredSlot = slotMap[1] !== undefined ? 1 : (defPalDefaults[0] ?? 1);
+      const resolvedIdx = resolvePaletteSlotIndex(preferredSlot, finalPals.length, slotMap, bodyIndices);
+      const safeIdx = finalPals[resolvedIdx]?.group < 7000
+        ? resolvedIdx
+        : Math.max(0, finalPals.findIndex(p => p.group < 7000));
+      setSelectedPaletteIdx(safeIdx);
+      if (finalPals[safeIdx]?.data) {
+        setActPalette(finalPals[safeIdx].data);
+      }
+    }
+
+    if (fileInputRef.current) fileInputRef.current.value = '';
     // Seed history after files are loaded
     pushToHistory();
   };
@@ -2285,21 +2491,25 @@ export default function MugenStudio({
     setCurrentFrame(0);
   };
 
-  const handleUpdateFrameField = (key: string, value: any) => {
+  const handleUpdateFrameAt = (frameIdx: number, updates: Partial<AirElement>) => {
     if (!airData || selectedActionId === null) return;
     const action = airData.actions[selectedActionId];
     if (!action) return;
-    const element = action.elements[currentFrame];
+    const element = action.elements[frameIdx];
     if (!element) return;
-    
+
     const nextAir = { ...airData };
     const nextAction = { ...action };
     nextAction.elements = [...nextAction.elements];
-    nextAction.elements[currentFrame] = { ...element, [key]: value };
+    nextAction.elements[frameIdx] = { ...element, ...updates };
     nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
     airDataRef.current = nextAir;
     setAirData(nextAir);
     syncAirRawText(nextAir);
+  };
+
+  const handleUpdateFrameField = (key: string, value: any) => {
+    handleUpdateFrameAt(currentFrame, { [key]: value } as Partial<AirElement>);
   };
 
   const handleAddFrame = () => {
@@ -2309,31 +2519,53 @@ export default function MugenStudio({
     
     const nextAir = { ...airData };
     const nextAction = { ...action };
-    nextAction.elements = [...nextAction.elements, { group: 0, image: 0, xOffset: 0, yOffset: 0, time: 5, flip: "" }];
+    const lastEl = nextAction.elements[nextAction.elements.length - 1];
+    nextAction.elements = [
+      ...nextAction.elements,
+      {
+        group: lastEl?.group ?? 0,
+        image: lastEl?.image ?? 0,
+        xOffset: 0,
+        yOffset: 0,
+        time: 5,
+        flip: "",
+      },
+    ];
     nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
+    airDataRef.current = nextAir;
     setAirData(nextAir);
     setCurrentFrame(nextAction.elements.length - 1);
     syncAirRawText(nextAir);
+    pushToHistory(undefined, nextAir);
   };
 
-  const handleDuplicateFrame = () => {
+  const handleDuplicateFrameAt = (frameIdx: number) => {
     if (!airData || selectedActionId === null) return;
     const action = airData.actions[selectedActionId];
     if (!action) return;
-    const element = action.elements[currentFrame];
+    const element = action.elements[frameIdx];
     if (!element) return;
 
     const nextAir = { ...airData };
     const nextAction = { ...action };
     nextAction.elements = [...nextAction.elements];
-    nextAction.elements.splice(currentFrame + 1, 0, { ...element });
+    nextAction.elements.splice(frameIdx + 1, 0, { ...element });
+    if (nextAction.loopstartIndex !== undefined && nextAction.loopstartIndex > frameIdx) {
+      nextAction.loopstartIndex += 1;
+    }
     nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
+    airDataRef.current = nextAir;
     setAirData(nextAir);
-    setCurrentFrame(currentFrame + 1);
+    setCurrentFrame(frameIdx + 1);
     syncAirRawText(nextAir);
+    pushToHistory(undefined, nextAir);
   };
 
-  const handleDeleteFrame = () => {
+  const handleDuplicateFrame = () => {
+    handleDuplicateFrameAt(currentFrame);
+  };
+
+  const handleDeleteFrameAt = (frameIdx: number) => {
     if (!airData || selectedActionId === null) return;
     const action = airData.actions[selectedActionId];
     if (!action || action.elements.length <= 1) {
@@ -2343,48 +2575,119 @@ export default function MugenStudio({
 
     const nextAir = { ...airData };
     const nextAction = { ...action };
-    nextAction.elements = nextAction.elements.filter((_, idx) => idx !== currentFrame);
+    nextAction.elements = nextAction.elements.filter((_, idx) => idx !== frameIdx);
+    if (nextAction.loopstartIndex !== undefined) {
+      if (nextAction.loopstartIndex === frameIdx) {
+        nextAction.loopstartIndex = undefined;
+      } else if (nextAction.loopstartIndex > frameIdx) {
+        nextAction.loopstartIndex -= 1;
+      }
+    }
     nextAir.actions = { ...nextAir.actions, [selectedActionId]: nextAction };
+    airDataRef.current = nextAir;
     setAirData(nextAir);
-    setCurrentFrame(Math.max(0, currentFrame - 1));
+    setCurrentFrame(prev => Math.max(0, Math.min(nextAction.elements.length - 1, prev > frameIdx ? prev - 1 : prev)));
     syncAirRawText(nextAir);
+    pushToHistory(undefined, nextAir);
   };
 
-  const handleMoveFrameOrder = (direction: -1 | 1) => {
+  const handleDeleteFrame = () => {
+    handleDeleteFrameAt(currentFrame);
+  };
+
+  const handleReorderFrame = (fromIdx: number, toIdx: number) => {
     if (!airData || selectedActionId === null) return;
     const action = airData.actions[selectedActionId];
     if (!action) return;
-    const targetIdx = currentFrame + direction;
-    if (targetIdx < 0 || targetIdx >= action.elements.length) return;
+    if (fromIdx < 0 || fromIdx >= action.elements.length || toIdx < 0 || toIdx >= action.elements.length || fromIdx === toIdx) {
+      return;
+    }
 
     const nextElements = [...action.elements];
-    const [moved] = nextElements.splice(currentFrame, 1);
-    nextElements.splice(targetIdx, 0, moved);
+    const [moved] = nextElements.splice(fromIdx, 1);
+    nextElements.splice(toIdx, 0, moved);
 
     let nextLoop = action.loopstartIndex;
-    if (nextLoop === currentFrame) nextLoop = targetIdx;
-    else if (nextLoop === targetIdx) nextLoop = currentFrame;
+    if (nextLoop !== undefined) {
+      if (nextLoop === fromIdx) nextLoop = toIdx;
+      else if (fromIdx < nextLoop && toIdx >= nextLoop) nextLoop -= 1;
+      else if (fromIdx > nextLoop && toIdx <= nextLoop) nextLoop += 1;
+    }
 
     const nextAction = { ...action, elements: nextElements, loopstartIndex: nextLoop };
     const nextAir = { ...airData, actions: { ...airData.actions, [selectedActionId]: nextAction } };
     airDataRef.current = nextAir;
     setAirData(nextAir);
-    setCurrentFrame(targetIdx);
+    setCurrentFrame(prev => {
+      if (prev === fromIdx) return toIdx;
+      if (fromIdx < prev && toIdx >= prev) return prev - 1;
+      if (fromIdx > prev && toIdx <= prev) return prev + 1;
+      return prev;
+    });
     syncAirRawText(nextAir);
     pushToHistory(undefined, nextAir);
   };
 
-  const handleToggleLoopstart = () => {
+  const handleMoveFrameOrder = (direction: -1 | 1) => {
+    handleReorderFrame(currentFrame, currentFrame + direction);
+  };
+
+  const handleToggleLoopstartAt = (frameIdx: number) => {
     if (!airData || selectedActionId === null) return;
     const action = airData.actions[selectedActionId];
     if (!action) return;
-    const nextLoop = action.loopstartIndex === currentFrame ? undefined : currentFrame;
+    const nextLoop = action.loopstartIndex === frameIdx ? undefined : frameIdx;
     const nextAction = { ...action, loopstartIndex: nextLoop };
     const nextAir = { ...airData, actions: { ...airData.actions, [selectedActionId]: nextAction } };
     airDataRef.current = nextAir;
     setAirData(nextAir);
     syncAirRawText(nextAir);
     pushToHistory(undefined, nextAir);
+  };
+
+  const handleToggleLoopstart = () => {
+    handleToggleLoopstartAt(currentFrame);
+  };
+
+  const handleBatchUpdateAction = (updater: (action: AirAction) => AirAction, logMessage?: string) => {
+    if (!airData || selectedActionId === null) return;
+    const action = airData.actions[selectedActionId];
+    if (!action) return;
+    const nextAction = updater(action);
+    const nextAir = { ...airData, actions: { ...airData.actions, [selectedActionId]: nextAction } };
+    airDataRef.current = nextAir;
+    setAirData(nextAir);
+    setCurrentFrame(prev => Math.max(0, Math.min(Math.max(0, nextAction.elements.length - 1), prev)));
+    syncAirRawText(nextAir);
+    pushToHistory(undefined, nextAir);
+    if (logMessage) appendEngineLog(logMessage);
+  };
+
+  const handleParseAirText = (rawText: string) => {
+    const parsedAir = parseAirString(rawText);
+    const ids = Object.keys(parsedAir.actions).map(Number).sort((a, b) => a - b);
+    let framesCount = 0;
+    let missingSffCount = 0;
+    for (const id of ids) {
+      const act = parsedAir.actions[id];
+      const actStats = getActionTimingStats(act, sffData);
+      framesCount += actStats.frameCount;
+      missingSffCount += actStats.missingCount;
+    }
+
+    airDataRef.current = parsedAir;
+    setAirData(parsedAir);
+    setAirRawText(rawText);
+    setIsPlaying(false);
+    setCurrentFrame(0);
+    if (ids.length > 0 && (selectedActionId === null || !parsedAir.actions[selectedActionId])) {
+      setSelectedActionId(ids[0]);
+    } else if (ids.length === 0) {
+      setSelectedActionId(null);
+    }
+    pushToHistory(undefined, parsedAir);
+    appendEngineLog(`Parsed .AIR: ${ids.length} actions, ${framesCount} frames (${missingSffCount} missing SFF links).`);
+    return { actionsCount: ids.length, framesCount, missingSffCount };
   };
 
   const handleApplyOffsetToAllFrames = () => {
@@ -2873,7 +3176,7 @@ export default function MugenStudio({
 
   const getChannelValue = (channel: 'r' | 'g' | 'b'): number => {
     if (selectedPalColorIdx === null) return 0;
-    const pal = actPalette || sffData?.images[selectedSpriteIdx]?.palette;
+    const pal = sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette || sffData?.images[selectedSpriteIdx]?.palette;
     if (!pal) return 0;
     const offset = selectedPalColorIdx * 4;
     if (channel === 'r') return pal[offset];
@@ -2884,7 +3187,7 @@ export default function MugenStudio({
 
   const handleModifyPaletteColor = (channel: 'r' | 'g' | 'b', value: number) => {
     if (selectedPalColorIdx === null) return;
-    const currentPal = actPalette || sffData?.images[selectedSpriteIdx]?.palette;
+    const currentPal = sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette || sffData?.images[selectedSpriteIdx]?.palette;
     if (!currentPal) return;
 
     const nextPal = new Uint8Array(currentPal);
@@ -2894,11 +3197,18 @@ export default function MugenStudio({
     if (channel === 'b') nextPal[offset + 2] = value;
     nextPal[offset + 3] = selectedPalColorIdx === 0 ? 0 : 255; // index 0 must be transparent
 
-    if (actPalette) {
+    if (actPalette || sffData?.palettes?.[selectedPaletteIdx]) {
       setActPalette(nextPal);
-    } else if (sffData && selectedSpriteIdx !== null) {
-      const nextSff = { ...sffData, images: [...sffData.images] };
-      if (nextSff.images[selectedSpriteIdx]) {
+    }
+    if (sffData) {
+      if (sffData.palettes && sffData.palettes[selectedPaletteIdx]) {
+        const nextPalettes = [...sffData.palettes];
+        nextPalettes[selectedPaletteIdx] = { ...nextPalettes[selectedPaletteIdx], data: nextPal };
+        const nextSff = { ...sffData, palettes: nextPalettes };
+        setSffData(nextSff);
+        sffDataRef.current = nextSff;
+      } else if (selectedSpriteIdx !== null && sffData.images[selectedSpriteIdx]) {
+        const nextSff = { ...sffData, images: [...sffData.images] };
         nextSff.images[selectedSpriteIdx] = { ...nextSff.images[selectedSpriteIdx], palette: nextPal };
         setSffData(nextSff);
         sffDataRef.current = nextSff;
@@ -2908,7 +3218,7 @@ export default function MugenStudio({
 
   const handleModifyHexColor = (hex: string) => {
     if (selectedPalColorIdx === null) return;
-    const currentPal = actPalette || sffData?.images[selectedSpriteIdx]?.palette;
+    const currentPal = sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette || sffData?.images[selectedSpriteIdx]?.palette;
     if (!currentPal) return;
 
     let raw = hex.replace('#', '');
@@ -2925,11 +3235,18 @@ export default function MugenStudio({
     nextPal[offset + 2] = b;
     nextPal[offset + 3] = selectedPalColorIdx === 0 ? 0 : 255;
 
-    if (actPalette) {
+    if (actPalette || sffData?.palettes?.[selectedPaletteIdx]) {
       setActPalette(nextPal);
-    } else if (sffData && selectedSpriteIdx !== null) {
-      const nextSff = { ...sffData, images: [...sffData.images] };
-      if (nextSff.images[selectedSpriteIdx]) {
+    }
+    if (sffData) {
+      if (sffData.palettes && sffData.palettes[selectedPaletteIdx]) {
+        const nextPalettes = [...sffData.palettes];
+        nextPalettes[selectedPaletteIdx] = { ...nextPalettes[selectedPaletteIdx], data: nextPal };
+        const nextSff = { ...sffData, palettes: nextPalettes };
+        setSffData(nextSff);
+        sffDataRef.current = nextSff;
+      } else if (selectedSpriteIdx !== null && sffData.images[selectedSpriteIdx]) {
+        const nextSff = { ...sffData, images: [...sffData.images] };
         nextSff.images[selectedSpriteIdx] = { ...nextSff.images[selectedSpriteIdx], palette: nextPal };
         setSffData(nextSff);
         sffDataRef.current = nextSff;
@@ -2938,7 +3255,7 @@ export default function MugenStudio({
   };
 
   const handleSavePalette = () => {
-    const pal = actPalette || sffData?.images[selectedSpriteIdx]?.palette;
+    const pal = sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette || sffData?.images[selectedSpriteIdx]?.palette;
     if (!pal) {
       alert("No active palette to download!");
       return;
@@ -3457,12 +3774,32 @@ export default function MugenStudio({
         <button className="p-1.5 hover:bg-white/10 rounded shrink-0" title={t('studio.toolbar.search') || 'Search'} onClick={() => setIsSearchModalOpen(true)}><Search size={16} color="#9ca3af" /></button>
         <div className="w-px h-6 bg-[#1a1a1a] mx-1 shrink-0" />
         <button
-          className="px-2 py-1 hover:bg-emerald-600/30 bg-emerald-950/50 border border-emerald-700/60 rounded shrink-0 flex items-center gap-1 text-[10px] font-bold text-emerald-300 transition-colors"
+          className="px-2 py-1 hover:bg-emerald-600/30 bg-emerald-950/50 border border-emerald-700/60 rounded shrink-0 flex items-center gap-1 text-[10px] font-bold text-emerald-300 transition-colors cursor-pointer"
           title="Open Mini Playable Move Tester Sandbox"
           onClick={() => setShowMoveTester(true)}
         >
           <Gamepad2 size={14} />
           <span>Test Moves</span>
+        </button>
+        <button
+          className={`px-2 py-1 border rounded shrink-0 flex items-center gap-1 text-[10px] font-bold transition-colors cursor-pointer ${
+            activeMode === 'Animations' && showAirVisualizer
+              ? 'bg-indigo-600 border-indigo-500 text-white'
+              : 'bg-indigo-950/50 hover:bg-indigo-900/50 border-indigo-700/60 text-indigo-300'
+          }`}
+          title="Open AIR Animation File Visualizer & Frame Sequencer"
+          onClick={() => {
+            if (activeMode !== 'Animations') {
+              setActiveMode('Animations');
+              setShowAirVisualizer(true);
+            } else {
+              setShowAirVisualizer(v => !v);
+            }
+            setMobileTab('center');
+          }}
+        >
+          <Film size={14} />
+          <span>AIR Visualizer</span>
         </button>
         <div className="w-px h-6 bg-[#1a1a1a] mx-1 shrink-0" />
         <div className="flex items-center gap-1 shrink-0">
@@ -3654,6 +3991,86 @@ export default function MugenStudio({
                                 value={getIniField(iniData, 'Files', 'sound')}
                                 onChange={e => handleUpdateDefValue('Files', 'sound', e.target.value)}
                             />
+                        </div>
+
+                        <div className="text-xs font-semibold text-gray-400 border-b border-[#333333] pt-2 pb-1">Palette Defaults & Slots</div>
+
+                        <div className="flex flex-col gap-1">
+                            <label className="text-[10px] text-gray-400">pal.defaults (e.g. 6,3,4,2)</label>
+                            <input
+                                type="text"
+                                className="bg-[#2a2a2a] border border-[#3a3a3a] px-2 py-1 outline-none text-gray-200 text-xs rounded font-mono"
+                                placeholder="1,2,3,4"
+                                value={getIniField(iniData, 'Info', 'pal.defaults')}
+                                onChange={e => handleUpdateDefValue('Info', 'pal.defaults', e.target.value)}
+                            />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-1.5">
+                            {[1, 2, 3, 4, 5, 6].map(slotNum => (
+                                <div key={slotNum} className="flex flex-col gap-0.5">
+                                    <label className="text-[9px] text-gray-500 font-mono">pal{slotNum}</label>
+                                    <input
+                                        type="text"
+                                        className="bg-[#222222] border border-[#383838] px-1.5 py-0.5 outline-none text-gray-200 text-[10px] rounded font-mono"
+                                        placeholder={`pal${slotNum}.act`}
+                                        value={getIniField(iniData, 'Files', `pal${slotNum}`)}
+                                        onChange={e => handleUpdateDefValue('Files', `pal${slotNum}`, e.target.value)}
+                                    />
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="flex items-center justify-between border-b border-[#333333] pt-2 pb-1">
+                            <span className="text-xs font-semibold text-purple-300">[Palette Keymap]</span>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    for (const k of PALETTE_KEYMAP_KEYS) {
+                                        handleUpdateDefValue('Palette Keymap', k, String(DEFAULT_KFM_PALETTE_KEYMAP[k]));
+                                    }
+                                }}
+                                className="text-[9px] font-mono text-gray-400 hover:text-purple-300 cursor-pointer"
+                                title="Reset to standard Kung Fu Man (KFM) keymap (x=1..c2=12)"
+                            >
+                                KFM Default
+                            </button>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-1.5">
+                            {PALETTE_KEYMAP_KEYS.map((keyBtn: PaletteKeyName) => {
+                                const curPalNum = studioPaletteKeymap[keyBtn];
+                                const pals = sffData?.palettes || [];
+                                const resolvedIdx = resolvePaletteSlotIndex(curPalNum, pals.length, studioPalSlotIndices);
+                                const swatchColor = getPaletteSwatchColor(pals[resolvedIdx]?.data);
+                                return (
+                                    <div key={keyBtn} className="flex items-center gap-1 bg-[#222222] border border-[#363636] rounded px-1.5 py-1">
+                                        <button
+                                            type="button"
+                                            onClick={() => handleSelectStudioPaletteIdx(resolvedIdx)}
+                                            title={`Preview ${keyBtn.toUpperCase()} -> Pal ${curPalNum}`}
+                                            className="flex items-center gap-1 text-[10px] font-mono font-bold text-gray-200 hover:text-purple-300 cursor-pointer shrink-0"
+                                        >
+                                            <span
+                                                className="w-2 h-2 rounded-full border border-black/50 shrink-0"
+                                                style={{ backgroundColor: swatchColor }}
+                                            />
+                                            <span className="uppercase">{keyBtn}</span>
+                                        </button>
+                                        <input
+                                            type="number"
+                                            min={1}
+                                            max={12}
+                                            value={curPalNum}
+                                            onChange={e => {
+                                                const v = Math.max(1, Math.min(12, parseInt(e.target.value, 10) || 1));
+                                                handleUpdateDefValue('Palette Keymap', keyBtn, String(v));
+                                            }}
+                                            className="w-full min-w-0 bg-[#141414] border border-[#333] rounded px-1 py-0.5 text-[10px] font-mono text-center text-purple-300 outline-none"
+                                        />
+                                    </div>
+                                );
+                            })}
                         </div>
 
                         <div className="text-[10px] text-gray-500 italic mt-2 text-center">
@@ -3963,19 +4380,35 @@ export default function MugenStudio({
                                          </button>
                                      </div>
                                      <div className="h-48 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 flex flex-col gap-1 text-[11px]">
-                                         {(sffData.palettes || []).map((pal, i) => (
+                                         {(sffData.palettes || []).map((pal, i) => {
+                                             const mappedKeys = getKeymapButtonsForPaletteIndex(
+                                                 i,
+                                                 studioPaletteKeymap,
+                                                 sffData.palettes?.length || 0,
+                                                 studioPalSlotIndices
+                                             );
+                                             return (
                                              <div 
                                                  key={i}
-                                                 onClick={() => setSelectedPaletteIdx(i)}
+                                                 onClick={() => handleSelectStudioPaletteIdx(i)}
                                                  className={`flex items-center justify-between p-2 rounded cursor-pointer hover:bg-[#333] transition-all ${selectedPaletteIdx === i ? 'bg-purple-900/40 text-purple-400 font-bold border-l-2 border-purple-500' : 'text-gray-400'}`}
                                              >
-                                                 <div className="flex items-center gap-2">
-                                                     <Palette size={12} className={selectedPaletteIdx === i ? 'text-purple-400' : 'text-gray-600'} />
-                                                     <span>{pal.group}, {pal.item}</span>
+                                                 <div className="flex items-center gap-2 min-w-0">
+                                                     <span
+                                                         className="w-2.5 h-2.5 rounded-full border border-black/50 shrink-0"
+                                                         style={{ backgroundColor: getPaletteSwatchColor(pal.data) }}
+                                                     />
+                                                     <span className="truncate">{pal.group}, {pal.item}</span>
+                                                     {mappedKeys.length > 0 && (
+                                                         <span className="text-[9px] font-mono text-purple-300/90 truncate">
+                                                             [{mappedKeys.slice(0, 2).map(k => k.toUpperCase()).join('/')}]
+                                                         </span>
+                                                     )}
                                                  </div>
-                                                 {selectedPaletteIdx === i && <span className="text-[8px] bg-purple-500 text-white px-1 rounded">ACTIVE</span>}
+                                                 {selectedPaletteIdx === i && <span className="text-[8px] bg-purple-500 text-white px-1 rounded shrink-0">ACTIVE</span>}
                                              </div>
-                                         ))}
+                                             );
+                                         })}
                                          {(!sffData.palettes || sffData.palettes.length === 0) && (
                                              <div className="p-4 text-center text-gray-500 italic text-[10px]">
                                                  No palettes detected in SFF. Import an .act file to begin.
@@ -3983,19 +4416,47 @@ export default function MugenStudio({
                                          )}
                                      </div>
 
-                                     {/* Quick Palette Preset Switcher */}
-                                     {sffData.palettes && sffData.palettes.length > 1 && (
-                                         <div className="flex flex-wrap gap-1 pt-1">
-                                             {sffData.palettes.map((pal, i) => (
-                                                 <button
-                                                     key={`pill-${i}`}
-                                                     type="button"
-                                                     onClick={() => setSelectedPaletteIdx(i)}
-                                                     className={`px-2 py-0.5 rounded text-[9px] font-mono border transition-colors ${selectedPaletteIdx === i ? 'bg-purple-600 text-white border-purple-400 font-bold' : 'bg-[#222] text-gray-400 border-[#3a3a3a] hover:text-white'}`}
-                                                 >
-                                                     Pal {pal.group},{pal.item}
-                                                 </button>
-                                             ))}
+                                     {/* Interactive [Palette Keymap] Preview Bar */}
+                                     {sffData.palettes && sffData.palettes.length > 0 && (
+                                         <div className="bg-[#212121] border border-[#333] rounded p-2 flex flex-col gap-1.5">
+                                             <div className="flex items-center justify-between text-[9px] font-bold uppercase text-purple-300">
+                                                 <span>[Palette Keymap] Preview</span>
+                                                 <span className="text-gray-500 font-mono">X–C / X2–C2</span>
+                                             </div>
+                                             <div className="grid grid-cols-3 gap-1">
+                                                 {PALETTE_KEYMAP_KEYS.map((keyBtn: PaletteKeyName) => {
+                                                     const palNum = studioPaletteKeymap[keyBtn];
+                                                     const resolvedIdx = resolvePaletteSlotIndex(
+                                                         palNum,
+                                                         sffData.palettes?.length || 0,
+                                                         studioPalSlotIndices,
+                                                         studioBodyPalIndices
+                                                     );
+                                                     const palData = sffData.palettes?.[resolvedIdx]?.data;
+                                                     const isSel = selectedPaletteIdx === resolvedIdx;
+                                                     return (
+                                                         <button
+                                                             key={keyBtn}
+                                                             type="button"
+                                                             onClick={() => handleSelectStudioPaletteIdx(resolvedIdx)}
+                                                             className={`px-1.5 py-1 rounded text-[9px] font-mono border flex items-center justify-between gap-1 cursor-pointer transition-colors ${
+                                                                 isSel
+                                                                     ? 'bg-purple-600 text-white border-purple-400 font-bold'
+                                                                     : 'bg-[#191919] text-gray-300 border-[#343434] hover:border-purple-500/60'
+                                                             }`}
+                                                         >
+                                                             <span className="flex items-center gap-1">
+                                                                 <span
+                                                                     className="w-2 h-2 rounded-full border border-black/50 shrink-0"
+                                                                     style={{ backgroundColor: getPaletteSwatchColor(palData) }}
+                                                                 />
+                                                                 <span className="uppercase">{keyBtn}</span>
+                                                             </span>
+                                                             <span className={isSel ? 'text-purple-100' : 'text-gray-500'}>P{palNum}</span>
+                                                         </button>
+                                                     );
+                                                 })}
+                                             </div>
                                          </div>
                                      )}
 
@@ -5150,14 +5611,33 @@ export default function MugenStudio({
                         <div className="flex flex-col gap-2">
                             <div className="text-[10px] text-gray-400 font-semibold uppercase">Included Palettes</div>
                             <div className="max-h-96 overflow-y-auto border border-[#333] bg-[#1a1a1a] rounded p-1 flex flex-col gap-1 text-[11px] custom-scrollbar">
-                                {(sffData.palettes || []).map((pal, i) => (
+                                {(sffData.palettes || []).map((pal, i) => {
+                                    const mappedKeys = pal.group < 7000
+                                        ? getKeymapButtonsForPaletteIndex(
+                                            i,
+                                            studioPaletteKeymap,
+                                            sffData.palettes?.length || 0,
+                                            studioPalSlotIndices,
+                                            studioBodyPalIndices
+                                        )
+                                        : [];
+                                    return (
                                     <div 
                                         key={i}
-                                        onClick={() => setSelectedPaletteIdx(i)}
+                                        onClick={() => handleSelectStudioPaletteIdx(i)}
                                         className={`flex flex-col p-2 rounded border cursor-pointer transition-all ${selectedPaletteIdx === i ? 'bg-blue-900/30 border-blue-600/80' : 'bg-[#222] border-transparent hover:border-[#444]'}`}
                                     >
                                         <div className="flex items-center justify-between mb-1">
-                                            <span className={`font-bold font-mono ${selectedPaletteIdx === i ? 'text-blue-400' : 'text-gray-300'}`}>Pal No. {i + 1}</span>
+                                            <div className="flex items-center gap-1.5">
+                                                <span className={`font-bold font-mono ${selectedPaletteIdx === i ? 'text-blue-400' : 'text-gray-300'}`}>Pal No. {i + 1}</span>
+                                                {pal.group >= 7000 ? (
+                                                    <span className="text-[9px] font-mono text-amber-300/80">[Portrait/FX]</span>
+                                                ) : mappedKeys.length > 0 && (
+                                                    <span className="text-[9px] font-mono text-purple-300">
+                                                        [{mappedKeys.slice(0, 2).map(k => k.toUpperCase()).join('/')}]
+                                                    </span>
+                                                )}
+                                            </div>
                                             <button 
                                                 onClick={(e) => { e.stopPropagation(); handleDeletePalette(i); }}
                                                 className="text-red-500 hover:bg-red-955/20 p-1 rounded transition-colors"
@@ -5188,7 +5668,8 @@ export default function MugenStudio({
                                             </div>
                                         </div>
                                     </div>
-                                ))}
+                                    );
+                                })}
                                 {(!sffData.palettes || sffData.palettes.length === 0) && (
                                     <div className="text-center py-6 text-gray-500 italic text-[10px]">No internal palettes in SFF.</div>
                                 )}
@@ -5811,7 +6292,13 @@ export default function MugenStudio({
                             
                             let effectivePalette = actPalette || sprite?.palette || firstSffPal?.data;
 
-                            if (sprite && sprite.isSharedPalette === false && sprite.palette) {
+                            if (
+                                sprite &&
+                                sprite.group >= 7000 &&
+                                !(sprite.group === 9000 && sprite.image === 0) &&
+                                sprite.isSharedPalette === false &&
+                                sprite.palette
+                            ) {
                                 effectivePalette = sprite.palette;
                             } else {
                                 effectivePalette = selectionPal?.data || firstSffPal?.data || actPalette || sprite?.palette;
@@ -5852,172 +6339,99 @@ export default function MugenStudio({
                     )}
 
                     {/* Tool panel right overlay - MOVED HERE TO BE ON TOP */}
-                    <div className="absolute top-6 right-6 flex flex-col gap-1.5 z-50" onMouseDown={e => e.stopPropagation()} onMouseMove={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()} onTouchMove={e => e.stopPropagation()}>
-                        <button onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(10, z + 0.5)); }} title="Zoom In" className="w-7 h-7 bg-[#3a3a3a] border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded text-gray-300 shadow-lg cursor-pointer"><ZoomIn size={14} /></button>
-                        <button onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(0.25, z - 0.5)); }} title="Zoom Out" className="w-7 h-7 bg-[#3a3a3a] border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded text-gray-300 shadow-lg cursor-pointer"><ZoomOut size={14} /></button>
-                        <button onClick={(e) => { e.stopPropagation(); setShowAxis(a => !a); }} title="Toggle Axis Grid" className={`w-7 h-7 border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded shadow-lg cursor-pointer ${showAxis ? 'bg-blue-600 text-white' : 'bg-[#3a3a3a] text-gray-300'}`}><Plus size={14} /></button>
-                        {activeMode === 'Animations' && (
-                            <button
-                                onClick={(e) => { e.stopPropagation(); setShowOnionSkin(o => !o); }}
-                                title="Toggle Onion Skinning (Previous Frame Ghost)"
-                                className={`w-7 h-7 border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded shadow-lg cursor-pointer ${showOnionSkin ? 'bg-amber-600 text-white' : 'bg-[#3a3a3a] text-gray-300'}`}
-                            >
-                                <Layers size={14} />
-                            </button>
-                        )}
-                    </div>
+                    {!(activeMode === 'Animations' && showAirVisualizer) && (
+                      <div className="absolute top-6 right-6 flex flex-col gap-1.5 z-50" onMouseDown={e => e.stopPropagation()} onMouseMove={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()} onTouchMove={e => e.stopPropagation()}>
+                          <button onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(10, z + 0.5)); }} title="Zoom In" className="w-7 h-7 bg-[#3a3a3a] border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded text-gray-300 shadow-lg cursor-pointer"><ZoomIn size={14} /></button>
+                          <button onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(0.25, z - 0.5)); }} title="Zoom Out" className="w-7 h-7 bg-[#3a3a3a] border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded text-gray-300 shadow-lg cursor-pointer"><ZoomOut size={14} /></button>
+                          <button onClick={(e) => { e.stopPropagation(); setShowAxis(a => !a); }} title="Toggle Axis Grid" className={`w-7 h-7 border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded shadow-lg cursor-pointer ${showAxis ? 'bg-blue-600 text-white' : 'bg-[#3a3a3a] text-gray-300'}`}><Plus size={14} /></button>
+                          {activeMode === 'Animations' && (
+                              <button
+                                  onClick={(e) => { e.stopPropagation(); setShowOnionSkin(o => !o); }}
+                                  title="Toggle Onion Skinning (Previous Frame Ghost)"
+                                  className={`w-7 h-7 border border-[#111111] flex items-center justify-center hover:bg-[#555] rounded shadow-lg cursor-pointer ${showOnionSkin ? 'bg-amber-600 text-white' : 'bg-[#3a3a3a] text-gray-300'}`}
+                              >
+                                  <Layers size={14} />
+                              </button>
+                          )}
+                      </div>
+                    )}
                 </div>
             )}
 
-                    {activeMode === 'Animations' && (
-                        (() => {
-                            const action = selectedActionId !== null && airData ? airData.actions[selectedActionId] : null;
-                            const elements = action ? action.elements : [];
-                            const currentElement = elements[currentFrame] || null;
-                            const totalFrames = elements.length; return (
-                            
-                                                <div 
-                                    onMouseDown={e => e.stopPropagation()}
-                                    onMouseMove={e => e.stopPropagation()}
-                                    onMouseUp={e => e.stopPropagation()}
-                                    onTouchStart={e => e.stopPropagation()}
-                                    onTouchMove={e => e.stopPropagation()}
-                                    onTouchEnd={e => e.stopPropagation()}
-                                    onClick={e => e.stopPropagation()}
-                                    className="absolute bottom-0 left-0 md:left-8 right-0 h-40 md:h-36 bg-[#1a1a1a] border-t border-[#333333] p-2 flex flex-col gap-1.5 shadow-2xl z-20 select-none"
-                                >
-                                    {/* Timeline Toolbar Row */}
-                                    <div className="flex flex-wrap md:flex-nowrap items-center justify-between gap-1.5 border-b border-[#2d2d2d] pb-1.5 overflow-x-auto scrollbar-none">
-                                        {/* Playback & Speed */}
-                                        <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
-                                            <button 
-                                                onClick={() => setIsPlaying(!isPlaying)} 
-                                                className={`px-2.5 py-1 md:px-3 md:py-1 rounded border border-[#3a3a3a] flex items-center gap-1 font-bold text-[10px] md:text-[11px] transition-colors ${isPlaying ? 'bg-red-950/50 text-red-400 border-red-800' : 'bg-green-950/50 text-green-400 border-green-800'}`}
-                                                title={isPlaying ? "Pause Anim Playback" : "Play Anim Sequence"}
-                                            >
-                                                {isPlaying ? <Pause size={10} /> : <Play size={10} />}
-                                                {isPlaying ? 'PAUSE' : 'PLAY'}
-                                            </button>
-                                            
-                                            <button 
-                                                onClick={() => { setIsPlaying(false); setCurrentFrame(0); }}
-                                                className="px-2 py-1 rounded bg-[#2a2a2a] hover:bg-[#333] border border-[#3a3a3a] text-gray-300 text-[10px] font-bold"
-                                                title="Reset current playhead to Frame 1"
-                                            >
-                                                STOP
-                                            </button>
+                    {activeMode === 'Animations' && !showAirVisualizer && (
+                        <AirTimelineStrip
+                            sffData={sffData}
+                            airData={airData}
+                            selectedActionId={selectedActionId}
+                            currentFrame={currentFrame}
+                            selectedPaletteIdx={selectedPaletteIdx}
+                            actPalette={actPalette}
+                            isPlaying={isPlaying}
+                            playbackSpeed={playbackSpeed}
+                            onTogglePlay={() => setIsPlaying(p => !p)}
+                            onStop={() => { setIsPlaying(false); setCurrentFrame(0); }}
+                            onSelectFrame={idx => { setIsPlaying(false); setCurrentFrame(idx); }}
+                            onSetPlaybackSpeed={setPlaybackSpeed}
+                            onUpdateFrameAt={handleUpdateFrameAt}
+                            onReorderFrame={handleReorderFrame}
+                            onToggleLoopstartAt={handleToggleLoopstartAt}
+                            onAddFrame={handleAddFrame}
+                            onDuplicateFrameAt={handleDuplicateFrameAt}
+                            onDeleteFrameAt={handleDeleteFrameAt}
+                            onSetAllDurations={ticks =>
+                                handleBatchUpdateAction(
+                                    act => ({
+                                        ...act,
+                                        elements: act.elements.map(el => ({ ...el, time: ticks })),
+                                    }),
+                                    `Set all frames in Action ${selectedActionId} to ${ticks} ticks.`
+                                )
+                            }
+                            onOpenFullVisualizer={() => setShowAirVisualizer(true)}
+                        />
+                    )}
 
-                                            {/* Speed controls */}
-                                            <span className="text-[10px] text-gray-500 font-bold ml-1 md:ml-2">SPEED:</span>
-                                            <div className="flex bg-[#262626] rounded border border-[#3a3a3a] p-0.5">
-                                                {[0.5, 1, 2].map(sp => (
-                                                    <button 
-                                                        key={sp}
-                                                        onClick={() => setPlaybackSpeed(sp)}
-                                                        className={`px-1.5 py-0.5 text-[9px] font-mono rounded font-medium transition-all ${playbackSpeed === sp ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white hover:bg-[#333]'}`}
-                                                    >
-                                                        {sp}x
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        </div>
-
-                                        {/* Frame Info & Duration Quick-Edit on Timeline */}
-                                        <div className="flex items-center gap-1.5 md:gap-3 shrink-0 flex-wrap">
-                                            {currentElement && (
-                                                <div className="flex items-center gap-1.5 text-[10px] md:text-[11px] bg-[#242424] border border-[#3a3a3a] px-2 py-0.5 rounded text-gray-300">
-                                                    <span className="text-gray-500 font-bold max-md:hidden">DELAY:</span>
-                                                    <input 
-                                                        type="number" 
-                                                        className="w-10 md:w-12 bg-black text-center text-[10px] text-blue-400 font-mono font-bold rounded border border-[#444] px-0.5 focus:border-blue-500 outline-none"
-                                                        value={currentElement.time ?? 1}
-                                                        title="Ticks delay for the active frame. Enter -1 for infinite hold!"
-                                                        onChange={e => handleUpdateFrameField('time', parseInt(e.target.value) || 0)}
-                                                    />
-                                                    <span className="text-gray-500 text-[9px]">ticks</span>
-                                                    {currentElement.time <= 0 && (
-                                                        <span className="bg-amber-950 text-amber-400 border border-amber-800 text-[8px] font-bold px-1.5 rounded leading-none py-0.5 max-md:hidden">
-                                                            INF
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            )}
-
-                                            {action && (
-                                                <div className="flex gap-1 text-[9px] md:text-xs">
-                                                    <button onClick={handleAddFrame} className="bg-blue-950/20 border border-blue-900 hover:bg-blue-900/40 px-2 py-1 md:px-1.5 md:py-0.5 font-bold text-blue-400 rounded transition-all">+ Frame</button>
-                                                    <button onClick={handleDuplicateFrame} className="bg-yellow-950/20 border border-yellow-900 hover:bg-yellow-950/40 px-2 py-1 md:px-1.5 md:py-0.5 font-bold text-yellow-500 rounded transition-all">Dup</button>
-                                                    <button 
-                                                        onClick={handleDeleteFrame} 
-                                                        className="bg-red-950/20 border border-red-900 hover:bg-red-900/40 px-2 py-1 md:px-1.5 md:py-0.5 font-bold text-red-500 rounded transition-all"
-                                                        disabled={totalFrames <= 1}
-                                                    >
-                                                        Delete
-                                                    </button>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    {/* Scrollable Frame Strip view */}
-                                    <div className="flex-1 flex gap-2 overflow-x-auto overflow-y-hidden py-1 items-center px-1 select-none scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
-                                        {elements.map((elem, idx) => {
-                                            const isActive = idx === currentFrame;
-                                            const isLoopStart = action && action.loopstartIndex === idx;
-                                            const duration = elem.time;
-                                            const effClsn1 = elem.clsn1 ?? action?.clsn1 ?? [];
-                                            const effClsn2 = elem.clsn2 ?? action?.clsn2 ?? [];
-                                            const hasClsn1 = effClsn1.length > 0;
-                                            const hasClsn2 = effClsn2.length > 0;
-                                            
-                                            return (
-                                                <div 
-                                                    key={idx}
-                                                    onClick={() => { setIsPlaying(false); setCurrentFrame(idx); }}
-                                                    className={`w-24 flex-shrink-0 cursor-pointer p-1.5 rounded border text-left flex flex-col justify-between h-[56px] transition-all select-none ${isActive ? 'bg-blue-950/40 border-blue-500 text-white shadow font-bold' : 'bg-[#121212] border-[#2c2c2c] text-zinc-400 hover:border-zinc-500'}`}
-                                                >
-                                                    <div className="flex justify-between items-center text-[9px] gap-1">
-                                                        <span className={isActive ? "text-blue-300 font-bold" : "text-zinc-500"}>#{idx + 1}</span>
-                                                        {isLoopStart && (
-                                                            <span className="text-[7px] font-bold px-1 rounded bg-emerald-700/80 text-white" title="Loopstart Marker">LOOP</span>
-                                                        )}
-                                                        <span className="font-mono text-[8px] bg-[#222] px-1 rounded border border-[#333]">S: {elem.group}, {elem.image}</span>
-                                                    </div>
-                                                    
-                                                    <div className="flex justify-between items-center mt-1">
-                                                        <div className="flex gap-1.5 items-center">
-                                                            <span className={`text-[9px] font-mono ${duration <= 0 ? 'text-amber-500 font-bold' : 'text-zinc-300'}`}>
-                                                                {duration <= 0 ? '∞ ticks' : `${duration}t`}
-                                                            </span>
-                                                        </div>
-                                                        {/* Collision info */}
-                                                        <div className="flex gap-0.5 items-center">
-                                                            {hasClsn1 && (
-                                                                <span className="w-1.5 h-1.5 rounded-full bg-red-500" title="Attack Collision Box Present" />
-                                                            )}
-                                                            {hasClsn2 && (
-                                                                <span className="w-1.5 h-1.5 rounded-full bg-blue-500" title="Defense Collision Box Present" />
-                                                            )}
-                                                        </div>
-                                                    </div>
-                                                    
-                                                    {/* Progress playhead bar on the card */}
-                                                    {isActive && (
-                                                        <div className="h-0.5 bg-blue-500 w-full mt-1 rounded-full animate-pulse" />
-                                                    )}
-                                                </div>
-                                            );
-                                        })}
-                                        
-                                        {elements.length === 0 && (
-                                            <div className="text-zinc-500 text-[10px] italic text-center w-full py-2">
-                                                No animation frames in sequence. Click "+ Frame" or select from the Visual Sprite Picker to assign frames!
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            );
-                        })()
+                    {activeMode === 'Animations' && showAirVisualizer && (
+                        <AirStoryboardVisualizer
+                            sffData={sffData}
+                            airData={airData}
+                            airRawText={airRawText}
+                            selectedActionId={selectedActionId}
+                            currentFrame={currentFrame}
+                            selectedPaletteIdx={selectedPaletteIdx}
+                            actPalette={actPalette}
+                            isPlaying={isPlaying}
+                            playbackSpeed={playbackSpeed}
+                            showClsn={showClsn}
+                            showAxis={showAxis}
+                            showOnionSkin={showOnionSkin}
+                            onClose={() => setShowAirVisualizer(false)}
+                            onSelectAction={id => {
+                                setIsPlaying(false);
+                                setSelectedActionId(id);
+                                setCurrentFrame(0);
+                            }}
+                            onSelectFrame={idx => {
+                                setIsPlaying(false);
+                                setCurrentFrame(idx);
+                            }}
+                            onTogglePlay={() => setIsPlaying(p => !p)}
+                            onStop={() => { setIsPlaying(false); setCurrentFrame(0); }}
+                            onSetPlaybackSpeed={setPlaybackSpeed}
+                            onToggleClsn={() => setShowClsn(c => !c)}
+                            onToggleAxis={() => setShowAxis(a => !a)}
+                            onToggleOnionSkin={() => setShowOnionSkin(o => !o)}
+                            onUpdateFrameAt={handleUpdateFrameAt}
+                            onReorderFrame={handleReorderFrame}
+                            onToggleLoopstartAt={handleToggleLoopstartAt}
+                            onAddFrame={handleAddFrame}
+                            onDuplicateFrameAt={handleDuplicateFrameAt}
+                            onDeleteFrameAt={handleDeleteFrameAt}
+                            onBatchUpdateAction={handleBatchUpdateAction}
+                            onParseAirText={handleParseAirText}
+                            onExportAir={handleExportStandaloneAir}
+                            onExportGif={handleExportActionGifFile}
+                        />
                     )}
          </div>
 
@@ -6143,7 +6557,12 @@ export default function MugenStudio({
                                return (
                                    <div className="grid grid-cols-3 gap-1.5">
                                         {filteredImages.map((img, i) => {
-                                            const effectivePalette = (img.isSharedPalette === false && img.palette)
+                                            const isDedicatedPortraitOrFx =
+                                                img.group >= 7000 &&
+                                                !(img.group === 9000 && img.image === 0) &&
+                                                img.isSharedPalette === false &&
+                                                Boolean(img.palette);
+                                            const effectivePalette = isDedicatedPortraitOrFx
                                                 ? img.palette
                                                 : (selectionPal?.data || firstSffPal?.data || actPalette || img.palette);
                                             const isAssigned = Boolean(activeEl && activeEl.group === img.group && activeEl.image === img.image);
@@ -6563,6 +6982,8 @@ export default function MugenStudio({
           actPalette
         }
         selectedPaletteIdx={selectedPaletteIdx}
+        onSelectPaletteIdx={handleSelectStudioPaletteIdx}
+        iniData={iniData}
         characterName={getIniField(iniData, 'Info', 'displayname') || getIniField(iniData, 'Info', 'name') || 'Character'}
         cmdFiles={cmdFiles}
         stFiles={stFiles}
@@ -6907,7 +7328,12 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
                     const prevEl = action.elements[frameIndex - 1];
                     const prevSprite = sff.images.find(i => i.group === prevEl.group && i.image === prevEl.image);
                     if (prevSprite) {
-                        const prevPal = act || prevSprite.palette;
+                        const prevHasPrivatePal =
+                            prevSprite.group >= 7000 &&
+                            !(prevSprite.group === 9000 && prevSprite.image === 0) &&
+                            prevSprite.isSharedPalette === false &&
+                            Boolean(prevSprite.palette);
+                        const prevPal = prevHasPrivatePal ? prevSprite.palette : (act || prevSprite.palette);
                         if (prevPal) {
                             try {
                                 const prevOff = getCachedSpriteCanvas(prevSprite, prevPal);
@@ -6935,7 +7361,12 @@ function AnimationStage({ sff, act, action, frameIndex, zoom, showClsn, showAxis
                 const sprite = sff.images.find(i => i.group === element.group && i.image === element.image);
                 
                 if (sprite) {
-                    const resolvedPal = act || sprite.palette;
+                    const hasPrivatePal =
+                        sprite.group >= 7000 &&
+                        !(sprite.group === 9000 && sprite.image === 0) &&
+                        sprite.isSharedPalette === false &&
+                        Boolean(sprite.palette);
+                    const resolvedPal = hasPrivatePal ? sprite.palette : (act || sprite.palette);
                     if (resolvedPal) {
                         try {
                             const offscreen = getCachedSpriteCanvas(sprite, resolvedPal);

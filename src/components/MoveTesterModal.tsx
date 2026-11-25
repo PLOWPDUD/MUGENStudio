@@ -1,6 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { X, Gamepad2, Eye, RotateCcw, Volume2, Search, Zap, Move, ArrowDown, CornerUpLeft, SlidersHorizontal, Keyboard, Swords, Shield, Cpu, Trophy, ChevronDown, ChevronUp } from 'lucide-react';
+import { X, Gamepad2, Eye, RotateCcw, Volume2, Search, Zap, Move, ArrowDown, CornerUpLeft, SlidersHorizontal, Keyboard, Swords, Shield, Cpu, Trophy, ChevronDown, ChevronUp, Palette } from 'lucide-react';
 import { applyPalette } from '../lib/mugen/actParser';
+import {
+  getKeymapButtonsForPaletteIndex,
+  PALETTE_KEYMAP_KEYS,
+  PaletteKeyName,
+  parsePalDefaults,
+  parsePaletteKeymap,
+  resolvePaletteSlotIndex,
+} from '../lib/mugen/defParser';
+import { getPaletteSwatchColor } from '../lib/mugen/characterLoader';
 import type { AirData, AirElement, ClsnBox, SffData, SffImage } from '../lib/mugen/types';
 import type { SndData } from '../lib/mugen/sndParser';
 
@@ -17,6 +26,8 @@ interface MoveTesterModalProps {
   airData: AirData | null;
   actPalette: Uint8Array | null;
   selectedPaletteIdx?: number;
+  onSelectPaletteIdx?: (idx: number) => void;
+  iniData?: Record<string, Record<string, string>> | null;
   characterName?: string;
   cmdFiles: TextFileLike[];
   stFiles: TextFileLike[];
@@ -87,7 +98,13 @@ type ControllerType =
   | 'changeanim'
   | 'playsnd'
   | 'statetypeset'
-  | 'ctrlset';
+  | 'ctrlset'
+  | 'projectile'
+  | 'helper'
+  | 'explod'
+  | 'removeexplod'
+  | 'modifyexplod'
+  | 'destroyself';
 
 interface ParsedController {
   id: string;
@@ -107,6 +124,47 @@ interface ParsedController {
   moveTypeVal?: 'I' | 'A' | 'H';
   physicsVal?: 'S' | 'C' | 'A' | 'N';
   ctrlVal?: number;
+
+  // Projectile fields
+  projId?: number;
+  projAnim?: number;
+  projHitAnim?: number;
+  projRemAnim?: number;
+  projCancelAnim?: number;
+  projVelX?: number;
+  projVelY?: number;
+  projOffsetX?: number;
+  projOffsetY?: number;
+  projRemoveTime?: number;
+
+  // Helper fields
+  helperType?: 'normal' | 'player';
+  helperName?: string;
+  helperId?: number;
+  helperStateNo?: number;
+  helperOffsetX?: number;
+  helperOffsetY?: number;
+  helperPosType?: 'p1' | 'p2' | 'front' | 'back' | 'left' | 'right';
+  helperFacing?: 1 | -1;
+  helperKeyCtrl?: number;
+  helperOwnPal?: number;
+
+  // Explod fields
+  explodAnim?: number;
+  explodId?: number;
+  explodOffsetX?: number;
+  explodOffsetY?: number;
+  explodPosType?: 'p1' | 'p2' | 'front' | 'back' | 'left' | 'right';
+  explodFacing?: 1 | -1;
+  explodVFacing?: 1 | -1;
+  explodBindTime?: number;
+  explodVelX?: number;
+  explodVelY?: number;
+  explodRemoveTime?: number;
+  explodScaleX?: number;
+  explodScaleY?: number;
+  explodSprPriority?: number;
+  explodOwnPal?: number;
 }
 
 interface ParsedStateInfo {
@@ -116,6 +174,8 @@ interface ParsedStateInfo {
   moveType: 'I' | 'A' | 'H';
   physics: 'S' | 'C' | 'A' | 'N';
   ctrlVal?: 0 | 1;
+  hitDefPersist?: boolean;
+  moveHitPersist?: boolean;
   anim?: number;
   velSetX?: number;
   velSetY?: number;
@@ -259,6 +319,53 @@ function parseSoundPair(val: string): { group: number; sample: number } | undefi
   return undefined;
 }
 
+interface ProjectileRuntime {
+  id: string;
+  projId: number;
+  ownerId: string;
+  team: 1 | 2;
+  posX: number;
+  posY: number; // 270 = ground
+  velX: number; // facing-relative
+  velY: number;
+  facing: 1 | -1;
+  animId: number;
+  hitAnimId?: number;
+  remAnimId?: number;
+  cancelAnimId?: number;
+  frameIdx: number;
+  tickInFrame: number;
+  lifeTicks: number;
+  maxTicks: number;
+  hitDef: ParsedHitDef;
+  isHitOrDying: boolean;
+  hitTargets: Set<string>;
+}
+
+interface ExplodRuntime {
+  id: string;
+  explodId: number;
+  ownerId: string;
+  team: 1 | 2;
+  animId: number;
+  posX: number;
+  posY: number;
+  velX: number;
+  velY: number;
+  facing: 1 | -1;
+  vfacing: 1 | -1;
+  bindTime: number;
+  removeTime: number;
+  scaleX: number;
+  scaleY: number;
+  sprPriority: number;
+  frameIdx: number;
+  tickInFrame: number;
+  ageTicks: number;
+  ownerLastX?: number;
+  ownerLastY?: number;
+}
+
 interface EvalContext {
   stateTime: number;
   animElem: number;
@@ -292,6 +399,15 @@ interface EvalContext {
   actElements?: AirElement[];
   constants: CharacterPhysicsConstants;
   heldCmds?: Set<string>;
+  pressedCmds?: Set<string>;
+  isHelper?: boolean;
+  helperId?: number;
+  ownerId?: string;
+  helpers?: FighterRuntime[];
+  explods?: ExplodRuntime[];
+  projectiles?: ProjectileRuntime[];
+  parentLife?: number;
+  facing?: 1 | -1;
 }
 
 function resolveConstValue(name: string, c: CharacterPhysicsConstants): number {
@@ -391,7 +507,6 @@ function evalSingleClause(rawClause: string, ctx: EvalContext): boolean {
     const inner = clause.slice(1).trim();
     if (/^time$/i.test(inner)) return ctx.stateTime === 0;
     if (/^animtime$/i.test(inner)) return ctx.animTime === 0;
-    if (/^ishelper\b/i.test(inner)) return true;
     if (/^ailevel\b/i.test(inner)) return true;
     if (/^ctrl$/i.test(inner)) return ctx.ctrl === 0;
     if (/^movecontact$/i.test(inner)) return ctx.mode === 'fight' ? ctx.moveContact === 0 : true;
@@ -417,7 +532,21 @@ function evalSingleClause(rawClause: string, ctx: EvalContext): boolean {
   }
 
   // Player / Environment guards
-  if (/^ishelper\b/i.test(clause)) return /=\s*0|!=\s*1/.test(clause);
+  const isHelperMatch = clause.match(/^ishelper(?:\s*\(\s*(\d+)\s*\))?(?:\s*(=|!=)\s*(\d+))?$/i);
+  if (isHelperMatch) {
+    const reqId = isHelperMatch[1] ? parseInt(isHelperMatch[1], 10) : undefined;
+    const isH = ctx.isHelper && (reqId === undefined || ctx.helperId === reqId) ? 1 : 0;
+    if (!isHelperMatch[2]) return isH === 1;
+    const rhs = parseInt(isHelperMatch[3], 10);
+    return isHelperMatch[2] === '=' ? isH === rhs : isH !== rhs;
+  }
+  const parentAliveMatch = clause.match(/^parent\s*,\s*alive(?:\s*(=|!=)\s*(\d+))?$/i);
+  if (parentAliveMatch) {
+    const pAlive = (ctx.parentLife ?? 1) > 0 ? 1 : 0;
+    if (!parentAliveMatch[1]) return pAlive === 1;
+    const rhs = parseInt(parentAliveMatch[2], 10);
+    return parentAliveMatch[1] === '=' ? pAlive === rhs : pAlive !== rhs;
+  }
   if (/^ailevel\b/i.test(clause)) return /=\s*0|<=\s*0|<\s*1/.test(clause);
   const aliveMatch = clause.match(/^alive(?:\s*(=|!=)\s*(\d+))?$/i);
   if (aliveMatch) {
@@ -602,22 +731,83 @@ function evalSingleClause(rawClause: string, ctx: EvalContext): boolean {
     return phMatch[1] === '=' ? ctx.physics === target : ctx.physics !== target;
   }
 
-  // Character vars default to 0 at move start; helper/explod counts default to 0
-  const varCompareMatch = clause.match(/^(?:var|fvar|sysvar|numhelper|numexplod)\s*\([^)]*\)\s*(=|!=|<|<=|>|>=)\s*(-?\d+(?:\.\d+)?)$/i);
+  // numhelper(ID) or numhelper
+  const numHelperMatch = clause.match(/^numhelper(?:\s*\(\s*(\d+)\s*\))?(?:\s*(=|!=|<|<=|>|>=)\s*(-?\d+))?$/i);
+  if (numHelperMatch) {
+    const targetHId = numHelperMatch[1] ? parseInt(numHelperMatch[1], 10) : undefined;
+    const activeHelpers = ctx.helpers || [];
+    const count = activeHelpers.filter(h =>
+      (ctx.ownerId ? h.ownerId === ctx.ownerId : true) &&
+      (targetHId !== undefined ? h.helperId === targetHId : true) &&
+      h.life > 0
+    ).length;
+    if (!numHelperMatch[2]) return count > 0;
+    return compareOp(count, numHelperMatch[2], parseInt(numHelperMatch[3], 10));
+  }
+
+  // numexplod(ID) or numexplod
+  const numExplodMatch = clause.match(/^numexplod(?:\s*\(\s*(\d+)\s*\))?(?:\s*(=|!=|<|<=|>|>=)\s*(-?\d+))?$/i);
+  if (numExplodMatch) {
+    const targetEId = numExplodMatch[1] ? parseInt(numExplodMatch[1], 10) : undefined;
+    const activeExplods = ctx.explods || [];
+    const count = activeExplods.filter(e =>
+      (ctx.ownerId ? e.ownerId === ctx.ownerId : true) &&
+      (targetEId !== undefined ? e.explodId === targetEId : true)
+    ).length;
+    if (!numExplodMatch[2]) return count > 0;
+    return compareOp(count, numExplodMatch[2], parseInt(numExplodMatch[3], 10));
+  }
+
+  // numproj / numprojid(ID)
+  const numProjMatch = clause.match(/^numproj(?:id)?(?:\s*\(\s*(\d+)\s*\))?(?:\s*(=|!=|<|<=|>|>=)\s*(-?\d+))?$/i);
+  if (numProjMatch) {
+    const targetPId = numProjMatch[1] ? parseInt(numProjMatch[1], 10) : undefined;
+    const activeProj = ctx.projectiles || [];
+    const count = activeProj.filter(p =>
+      (ctx.ownerId ? p.ownerId === ctx.ownerId : true) &&
+      (targetPId !== undefined ? p.projId === targetPId : true) &&
+      !p.isHitOrDying
+    ).length;
+    if (!numProjMatch[2]) return count > 0;
+    return compareOp(count, numProjMatch[2], parseInt(numProjMatch[3], 10));
+  }
+
+  // FrontEdgeBodyDist / FrontEdgeDist / BackEdgeBodyDist
+  const frontDistMatch = clause.match(/^(?:frontedgebodydist|frontedgedist)\s*(=|!=|<|<=|>|>=)\s*(-?\d+(?:\.\d+)?)$/i);
+  if (frontDistMatch) {
+    const facing = ctx.facing ?? 1;
+    const edgeX = facing === 1 ? 520 : -520;
+    const distToEdge = (edgeX - ctx.posX) * facing;
+    return compareOp(distToEdge, frontDistMatch[1], parseFloat(frontDistMatch[2]));
+  }
+
+  const backDistMatch = clause.match(/^(?:backedgebodydist|backedgedist)\s*(=|!=|<|<=|>|>=)\s*(-?\d+(?:\.\d+)?)$/i);
+  if (backDistMatch) {
+    const facing = ctx.facing ?? 1;
+    const edgeX = facing === 1 ? -520 : 520;
+    const distToEdge = (ctx.posX - edgeX) * facing;
+    return compareOp(distToEdge, backDistMatch[1], parseFloat(backDistMatch[2]));
+  }
+
+  // Character vars default to 0 at move start
+  const varCompareMatch = clause.match(/^(?:var|fvar|sysvar)\s*\([^)]*\)\s*(=|!=|<|<=|>|>=)\s*(-?\d+(?:\.\d+)?)$/i);
   if (varCompareMatch) {
     return compareOp(0, varCompareMatch[1], parseFloat(varCompareMatch[2]));
   }
-  if (/^(?:var|fvar|sysvar|numhelper|numexplod)\s*\(/i.test(clause)) {
+  if (/^(?:var|fvar|sysvar)\s*\(/i.test(clause)) {
     return false;
   }
 
   const cmdHoldMatch = clause.match(/^command\s*(=|!=)\s*"([^"]+)"$/i);
-  if (cmdHoldMatch && ctx.heldCmds) {
-    const cname = cmdHoldMatch[2].trim().toLowerCase().replace(/_/g, '');
-    if (cname === 'holdfwd' || cname === 'holdback' || cname === 'holdup' || cname === 'holddown') {
-      const isHeld = ctx.heldCmds.has(cname);
+  if (cmdHoldMatch) {
+    const rawCmd = cmdHoldMatch[2].trim().toLowerCase();
+    const dirCmd = rawCmd.replace(/_/g, '');
+    if (dirCmd === 'holdfwd' || dirCmd === 'holdback' || dirCmd === 'holdup' || dirCmd === 'holddown') {
+      const isHeld = Boolean(ctx.heldCmds?.has(dirCmd));
       return cmdHoldMatch[1] === '=' ? isHeld : !isHeld;
     }
+    const isPressed = Boolean(ctx.pressedCmds?.has(rawCmd) || ctx.pressedCmds?.has(dirCmd));
+    return cmdHoldMatch[1] === '=' ? isPressed : !isPressed;
   }
 
   if (ctx.mode === 'fight' && ctx.p2BodyDistX !== undefined) {
@@ -826,6 +1016,44 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
     let ctrlHasAnimTimeEnd = false;
     let hitDefScratch: Partial<ParsedHitDef> & { hasGetPower?: boolean; hasGivePower?: boolean } = {};
 
+    let ctrlProjId: number | undefined;
+    let ctrlProjAnim: number | undefined;
+    let ctrlProjHitAnim: number | undefined;
+    let ctrlProjRemAnim: number | undefined;
+    let ctrlProjCancelAnim: number | undefined;
+    let ctrlProjVelX: number | undefined;
+    let ctrlProjVelY: number | undefined;
+    let ctrlProjOffsetX: number | undefined;
+    let ctrlProjOffsetY: number | undefined;
+    let ctrlProjRemoveTime: number | undefined;
+
+    let ctrlHelperType: 'normal' | 'player' | undefined;
+    let ctrlHelperName: string | undefined;
+    let ctrlHelperId: number | undefined;
+    let ctrlHelperStateNo: number | undefined;
+    let ctrlHelperOffsetX: number | undefined;
+    let ctrlHelperOffsetY: number | undefined;
+    let ctrlHelperPosType: 'p1' | 'p2' | 'front' | 'back' | 'left' | 'right' | undefined;
+    let ctrlHelperFacing: 1 | -1 | undefined;
+    let ctrlHelperKeyCtrl: number | undefined;
+    let ctrlHelperOwnPal: number | undefined;
+
+    let ctrlExplodAnim: number | undefined;
+    let ctrlExplodId: number | undefined;
+    let ctrlExplodOffsetX: number | undefined;
+    let ctrlExplodOffsetY: number | undefined;
+    let ctrlExplodPosType: 'p1' | 'p2' | 'front' | 'back' | 'left' | 'right' | undefined;
+    let ctrlExplodFacing: 1 | -1 | undefined;
+    let ctrlExplodVFacing: 1 | -1 | undefined;
+    let ctrlExplodBindTime: number | undefined;
+    let ctrlExplodVelX: number | undefined;
+    let ctrlExplodVelY: number | undefined;
+    let ctrlExplodRemoveTime: number | undefined;
+    let ctrlExplodScaleX: number | undefined;
+    let ctrlExplodScaleY: number | undefined;
+    let ctrlExplodSprPriority: number | undefined;
+    let ctrlExplodOwnPal: number | undefined;
+
     const resetControllerScratch = () => {
       cmdName = '';
       cmdPattern = '';
@@ -860,6 +1088,44 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
       triggerGroups = {};
       ctrlHasAnimTimeEnd = false;
       hitDefScratch = {};
+
+      ctrlProjId = undefined;
+      ctrlProjAnim = undefined;
+      ctrlProjHitAnim = undefined;
+      ctrlProjRemAnim = undefined;
+      ctrlProjCancelAnim = undefined;
+      ctrlProjVelX = undefined;
+      ctrlProjVelY = undefined;
+      ctrlProjOffsetX = undefined;
+      ctrlProjOffsetY = undefined;
+      ctrlProjRemoveTime = undefined;
+
+      ctrlHelperType = undefined;
+      ctrlHelperName = undefined;
+      ctrlHelperId = undefined;
+      ctrlHelperStateNo = undefined;
+      ctrlHelperOffsetX = undefined;
+      ctrlHelperOffsetY = undefined;
+      ctrlHelperPosType = undefined;
+      ctrlHelperFacing = undefined;
+      ctrlHelperKeyCtrl = undefined;
+      ctrlHelperOwnPal = undefined;
+
+      ctrlExplodAnim = undefined;
+      ctrlExplodId = undefined;
+      ctrlExplodOffsetX = undefined;
+      ctrlExplodOffsetY = undefined;
+      ctrlExplodPosType = undefined;
+      ctrlExplodFacing = undefined;
+      ctrlExplodVFacing = undefined;
+      ctrlExplodBindTime = undefined;
+      ctrlExplodVelX = undefined;
+      ctrlExplodVelY = undefined;
+      ctrlExplodRemoveTime = undefined;
+      ctrlExplodScaleX = undefined;
+      ctrlExplodScaleY = undefined;
+      ctrlExplodSprPriority = undefined;
+      ctrlExplodOwnPal = undefined;
     };
 
     const ensureState = (stateNo: number, labelHint?: string, resetOnNewDef = false): ParsedStateInfo => {
@@ -971,7 +1237,7 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
           }
 
           let builtHitDef: ParsedHitDef | undefined;
-          if (stateTypeCtrl === 'hitdef') {
+          if (stateTypeCtrl === 'hitdef' || stateTypeCtrl === 'projectile') {
             const attrMove = hitDefScratch.attrMove || (st.isHyper || ownerState >= 3000 ? 'H' : ownerState >= 1000 ? 'S' : 'N');
             const dmg = hitDefScratch.damage ?? (attrMove === 'H' ? 140 : attrMove === 'S' ? 85 : 42);
             const gDmg = hitDefScratch.guardDamage ?? (attrMove === 'N' ? 0 : Math.max(1, Math.round(dmg * 0.12)));
@@ -1024,6 +1290,12 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
             'playsnd',
             'statetypeset',
             'ctrlset',
+            'projectile',
+            'helper',
+            'explod',
+            'removeexplod',
+            'modifyexplod',
+            'destroyself',
           ];
 
           if (supportedTypes.includes(stateTypeCtrl as ControllerType)) {
@@ -1045,6 +1317,41 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
               moveTypeVal: ctrlMoveTypeVal,
               physicsVal: ctrlPhysicsVal,
               ctrlVal,
+              projId: ctrlProjId,
+              projAnim: ctrlProjAnim,
+              projHitAnim: ctrlProjHitAnim,
+              projRemAnim: ctrlProjRemAnim,
+              projCancelAnim: ctrlProjCancelAnim,
+              projVelX: ctrlProjVelX,
+              projVelY: ctrlProjVelY,
+              projOffsetX: ctrlProjOffsetX,
+              projOffsetY: ctrlProjOffsetY,
+              projRemoveTime: ctrlProjRemoveTime,
+              helperType: ctrlHelperType,
+              helperName: ctrlHelperName,
+              helperId: ctrlHelperId,
+              helperStateNo: ctrlHelperStateNo,
+              helperOffsetX: ctrlHelperOffsetX,
+              helperOffsetY: ctrlHelperOffsetY,
+              helperPosType: ctrlHelperPosType,
+              helperFacing: ctrlHelperFacing,
+              helperKeyCtrl: ctrlHelperKeyCtrl,
+              helperOwnPal: ctrlHelperOwnPal,
+              explodAnim: ctrlExplodAnim,
+              explodId: ctrlExplodId,
+              explodOffsetX: ctrlExplodOffsetX,
+              explodOffsetY: ctrlExplodOffsetY,
+              explodPosType: ctrlExplodPosType,
+              explodFacing: ctrlExplodFacing,
+              explodVFacing: ctrlExplodVFacing,
+              explodBindTime: ctrlExplodBindTime,
+              explodVelX: ctrlExplodVelX,
+              explodVelY: ctrlExplodVelY,
+              explodRemoveTime: ctrlExplodRemoveTime,
+              explodScaleX: ctrlExplodScaleX,
+              explodScaleY: ctrlExplodScaleY,
+              explodSprPriority: ctrlExplodSprPriority,
+              explodOwnPal: ctrlExplodOwnPal,
             });
           }
 
@@ -1241,6 +1548,12 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
         } else if (key === 'ctrl') {
           const c = parseInt(val, 10);
           if (c === 0 || c === 1) st.ctrlVal = c;
+        } else if (key === 'hitdefpersist') {
+          const n = parseInt(val, 10);
+          if (n === 1) st.hitDefPersist = true;
+        } else if (key === 'movehitpersist') {
+          const n = parseInt(val, 10);
+          if (n === 1) st.moveHitPersist = true;
         }
       } else if (/^state(?:\s|,|\d|-|$)/i.test(secLower)) {
         if (key === 'type') {
@@ -1257,6 +1570,8 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
           } else if (stateTypeCtrl === 'ctrlset' && /^-?\d+$/.test(val)) {
             ctrlVal = parseInt(val, 10);
           }
+        } else if (key === 'ctrl' && (stateTypeCtrl === 'changestate' || stateTypeCtrl === 'ctrlset') && /^-?\d+$/.test(val)) {
+          ctrlVal = parseInt(val, 10);
         } else if (key === 'time' && stateTypeCtrl === 'superpause') {
           const n = parseInt(val, 10);
           if (!Number.isNaN(n)) superTime = n;
@@ -1283,14 +1598,14 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
           if (activeStatedefNo !== null && states[activeStatedefNo] && (/\bH[APT]\b/i.test(val) || /,\s*H/i.test(val))) {
             states[activeStatedefNo].isHyper = true;
           }
-          if (stateTypeCtrl === 'hitdef') {
+          if (stateTypeCtrl === 'hitdef' || stateTypeCtrl === 'projectile') {
             const parts = val.split(',').map(p => p.trim().toUpperCase());
             const stChar = parts[0]?.charAt(0);
             if (stChar === 'S' || stChar === 'C' || stChar === 'A') hitDefScratch.attr = stChar;
             const mvChar = parts[1]?.charAt(0);
             if (mvChar === 'N' || mvChar === 'S' || mvChar === 'H') hitDefScratch.attrMove = mvChar;
           }
-        } else if (stateTypeCtrl === 'hitdef') {
+        } else if (stateTypeCtrl === 'hitdef' || stateTypeCtrl === 'projectile') {
           if (key === 'hitflag') hitDefScratch.hitFlag = val.toUpperCase().replace(/[^MAFDLH+-]/g, '');
           else if (key === 'guardflag') hitDefScratch.guardFlag = val.toUpperCase().replace(/[^MAHL]/g, '');
           else if (key === 'damage') {
@@ -1340,6 +1655,114 @@ function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLike[]) {
           } else if (key === 'guardsound') {
             const pair = parseSoundPair(val);
             if (pair) hitDefScratch.guardSound = pair;
+          }
+        }
+
+        if (stateTypeCtrl === 'projectile') {
+          if (key === 'proj.id' || key === 'projid' || key === 'id') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlProjId = n;
+          } else if (key === 'proj.anim' || key === 'projanim' || key === 'anim') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlProjAnim = n;
+          } else if (key === 'proj.hitanim' || key === 'projhitanim') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlProjHitAnim = n;
+          } else if (key === 'proj.remanim' || key === 'projremanim') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlProjRemAnim = n;
+          } else if (key === 'proj.cancelanim' || key === 'projcancelanim') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlProjCancelAnim = n;
+          } else if (key === 'velocity' || key === 'vel' || key === 'proj.velocity') {
+            const [vx, vy] = parseNumberPair(val);
+            if (vx !== undefined) ctrlProjVelX = vx;
+            if (vy !== undefined) ctrlProjVelY = vy;
+          } else if (key === 'offset' || key === 'pos' || key === 'proj.offset') {
+            const [ox, oy] = parseNumberPair(val);
+            if (ox !== undefined) ctrlProjOffsetX = ox;
+            if (oy !== undefined) ctrlProjOffsetY = oy;
+          } else if (key === 'removetime' || key === 'projremovetime' || key === 'proj.removetime') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlProjRemoveTime = n;
+          }
+        } else if (stateTypeCtrl === 'helper') {
+          if (key === 'helpertype') {
+            ctrlHelperType = val.toLowerCase() === 'player' ? 'player' : 'normal';
+          } else if (key === 'name') {
+            ctrlHelperName = val.replace(/^"|"$/g, '');
+          } else if (key === 'id') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlHelperId = n;
+          } else if (key === 'stateno' || key === 'value') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlHelperStateNo = n;
+          } else if (key === 'pos' || key === 'offset') {
+            const [ox, oy] = parseNumberPair(val);
+            if (ox !== undefined) ctrlHelperOffsetX = ox;
+            if (oy !== undefined) ctrlHelperOffsetY = oy;
+          } else if (key === 'postype') {
+            const pt = val.toLowerCase();
+            if (pt === 'p1' || pt === 'p2' || pt === 'front' || pt === 'back' || pt === 'left' || pt === 'right') {
+              ctrlHelperPosType = pt;
+            }
+          } else if (key === 'facing') {
+            const n = parseInt(val, 10);
+            if (n === 1 || n === -1) ctrlHelperFacing = n;
+          } else if (key === 'keyctrl') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlHelperKeyCtrl = n;
+          } else if (key === 'ownpal') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlHelperOwnPal = n;
+          }
+        } else if (stateTypeCtrl === 'explod') {
+          if (key === 'anim') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlExplodAnim = n;
+          } else if (key === 'id') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlExplodId = n;
+          } else if (key === 'pos' || key === 'offset') {
+            const [ox, oy] = parseNumberPair(val);
+            if (ox !== undefined) ctrlExplodOffsetX = ox;
+            if (oy !== undefined) ctrlExplodOffsetY = oy;
+          } else if (key === 'postype') {
+            const pt = val.toLowerCase();
+            if (pt === 'p1' || pt === 'p2' || pt === 'front' || pt === 'back' || pt === 'left' || pt === 'right') {
+              ctrlExplodPosType = pt;
+            }
+          } else if (key === 'facing') {
+            const n = parseInt(val, 10);
+            if (n === 1 || n === -1) ctrlExplodFacing = n;
+          } else if (key === 'vfacing') {
+            const n = parseInt(val, 10);
+            if (n === 1 || n === -1) ctrlExplodVFacing = n;
+          } else if (key === 'bindtime') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlExplodBindTime = n;
+          } else if (key === 'vel' || key === 'velocity') {
+            const [vx, vy] = parseNumberPair(val);
+            if (vx !== undefined) ctrlExplodVelX = vx;
+            if (vy !== undefined) ctrlExplodVelY = vy;
+          } else if (key === 'removetime') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlExplodRemoveTime = n;
+          } else if (key === 'scale') {
+            const [sx, sy] = parseNumberPair(val);
+            if (sx !== undefined) ctrlExplodScaleX = sx;
+            if (sy !== undefined) ctrlExplodScaleY = sy;
+          } else if (key === 'sprpriority') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlExplodSprPriority = n;
+          } else if (key === 'ownpal') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlExplodOwnPal = n;
+          }
+        } else if (stateTypeCtrl === 'removeexplod') {
+          if (key === 'id' || key === 'value') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) ctrlExplodId = n;
           }
         }
 
@@ -1659,6 +2082,12 @@ interface FighterRuntime {
   aiHoldDown: boolean;
   aiBlockTimer: number;
   pendingLanding?: boolean;
+  landingVelY?: number;
+  cmdBuffer?: Record<string, number>;
+  isHelper?: boolean;
+  helperId?: number;
+  ownerId?: string;
+  hasPlayedDeathSound: boolean;
 }
 
 function createFighterRuntime(
@@ -1724,6 +2153,9 @@ function createFighterRuntime(
     aiWalkDir: 0,
     aiHoldDown: false,
     aiBlockTimer: 0,
+    landingVelY: 0,
+    cmdBuffer: {},
+    hasPlayedDeathSound: false,
   };
 }
 
@@ -1741,7 +2173,13 @@ function getNearestLivingOpponent(f: FighterRuntime, oppTeam: FighterRuntime[]):
   return best || oppTeam[0];
 }
 
-function toWorldBox(b: ClsnBox, f: FighterRuntime) {
+interface BoxEntity {
+  posX: number;
+  posY: number;
+  facing: 1 | -1;
+}
+
+function toWorldBox(b: ClsnBox, f: BoxEntity) {
   const xA = f.posX + b.x1 * f.facing;
   const xB = f.posX + b.x2 * f.facing;
   const wyOffset = f.posY - 270;
@@ -1757,7 +2195,7 @@ function toWorldBox(b: ClsnBox, f: FighterRuntime) {
 
 function findBoxesOverlap(
   atkBoxes: ClsnBox[],
-  atk: FighterRuntime,
+  atk: BoxEntity,
   defBoxes: ClsnBox[],
   def: FighterRuntime
 ): { x: number; y: number } | null {
@@ -1784,6 +2222,8 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
   airData,
   actPalette,
   selectedPaletteIdx = 0,
+  onSelectPaletteIdx,
+  iniData = null,
   characterName = 'Character',
   cmdFiles,
   stFiles,
@@ -1794,6 +2234,40 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     () => parseCmdAndStates(cmdFiles, stFiles),
     [cmdFiles, stFiles]
   );
+
+  const paletteKeymap = useMemo(() => parsePaletteKeymap(iniData), [iniData]);
+  const palDefaults = useMemo(() => parsePalDefaults(iniData), [iniData]);
+  const palSlotIndices = useMemo(() => {
+    const map: Record<number, number> = {};
+    const pals = sffData?.palettes || [];
+    for (let i = 0; i < pals.length; i++) {
+      const p = pals[i];
+      if (p.group === 1 && p.item >= 1 && p.item <= 12 && map[p.item] === undefined) {
+        map[p.item] = i;
+      }
+    }
+    for (let i = 0; i < pals.length; i++) {
+      const p = pals[i];
+      if (p.group === 0 && p.item >= 1 && p.item <= 12 && map[p.item] === undefined) {
+        map[p.item] = i;
+      }
+    }
+    if (Object.keys(map).length === 0) {
+      let slot = 1;
+      for (let i = 0; i < pals.length && slot <= 12; i++) {
+        if (pals[i].group < 7000) {
+          map[slot++] = i;
+        }
+      }
+    }
+    return map;
+  }, [sffData]);
+
+  const bodyPalIndices = useMemo(() => {
+    const pals = sffData?.palettes || [];
+    const indices = pals.map((p, i) => (p.group < 7000 ? i : -1)).filter(i => i >= 0);
+    return indices.length > 0 ? indices : pals.map((_, i) => i);
+  }, [sffData]);
 
   const availableCmdTokens = useMemo(() => {
     const base = [
@@ -1829,6 +2303,9 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
   const [buttonSlots, setButtonSlots] = useState<CustomButtonSlot[]>(loadStoredButtonSlots);
   const [showCustomize, setShowCustomize] = useState(false);
+  const [showPaletteKeymapMenu, setShowPaletteKeymapMenu] = useState(false);
+  const [paletteMenuTarget, setPaletteMenuTarget] = useState<'p1' | 'p2'>('p1');
+  const [localP1PaletteIdx, setLocalP1PaletteIdx] = useState<number>(selectedPaletteIdx);
   const [listeningSlotId, setListeningSlotId] = useState<string | null>(null);
   const [mode, setMode] = useState<TesterMode>('practice');
   const [teamSize, setTeamSize] = useState<TeamSize>(1);
@@ -1861,15 +2338,33 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     activeDir: null,
   });
 
+  useEffect(() => {
+    const pals = sffData?.palettes || [];
+    const fallbackIdx = bodyPalIndices[0] ?? 0;
+    const safeIdx =
+      selectedPaletteIdx >= 0 &&
+      selectedPaletteIdx < pals.length &&
+      pals[selectedPaletteIdx]?.group < 7000
+        ? selectedPaletteIdx
+        : fallbackIdx;
+    setLocalP1PaletteIdx(safeIdx);
+  }, [selectedPaletteIdx, isOpen, sffData, bodyPalIndices]);
+
   const p1Palette = useMemo(
-    () => actPalette || sffData?.palettes?.[selectedPaletteIdx]?.data || sffData?.palettes?.[0]?.data || null,
-    [actPalette, sffData, selectedPaletteIdx]
+    () =>
+      sffData?.palettes?.[localP1PaletteIdx]?.data ||
+      actPalette ||
+      sffData?.palettes?.[selectedPaletteIdx]?.data ||
+      sffData?.palettes?.[0]?.data ||
+      null,
+    [actPalette, sffData, localP1PaletteIdx, selectedPaletteIdx]
   );
 
   const differentPaletteIndices = useMemo(() => {
     const pals = sffData?.palettes || [];
     const res: number[] = [];
     for (let i = 0; i < pals.length; i++) {
+      if (pals[i].group >= 7000) continue;
       if (!palettesAreSame(pals[i].data, p1Palette)) {
         res.push(i);
       }
@@ -1878,12 +2373,22 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
   }, [sffData, p1Palette]);
 
   useEffect(() => {
+    const total = sffData?.palettes?.length || 0;
+    if (total > 1) {
+      for (const defNum of palDefaults) {
+        const resolved = resolvePaletteSlotIndex(defNum, total, palSlotIndices, bodyPalIndices);
+        if (differentPaletteIndices.includes(resolved)) {
+          setP2PaletteIdx(resolved);
+          return;
+        }
+      }
+    }
     if (differentPaletteIndices.length > 0) {
       setP2PaletteIdx(differentPaletteIndices[0]);
     } else {
-      setP2PaletteIdx(0);
+      setP2PaletteIdx(bodyPalIndices[0] ?? 0);
     }
-  }, [differentPaletteIndices]);
+  }, [differentPaletteIndices, palDefaults, palSlotIndices, bodyPalIndices, sffData]);
 
   const p2Palette = useMemo(() => {
     const pals = sffData?.palettes || [];
@@ -1959,7 +2464,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       return { team1PortraitUrls: empty, team2PortraitUrls: empty };
     }
 
-    const mainPal = sffData.palettes?.[0]?.data || actPalette || null;
+    const mainPal = sffData.palettes?.find(p => p.group < 7000)?.data || sffData.palettes?.[0]?.data || actPalette || null;
     const hasDedicatedPortraitPalette = Boolean(
       iconSprite.palette &&
       mainPal &&
@@ -2111,6 +2616,9 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
   const aiDifficultyRef = useRef<AiDifficulty>('normal');
   const fightOutcomeRef = useRef<FightOutcome>(null);
   const sparksRef = useRef<HitSparkEffect[]>([]);
+  const projectilesRef = useRef<ProjectileRuntime[]>([]);
+  const helpersRef = useRef<FighterRuntime[]>([]);
+  const explodsRef = useRef<ExplodRuntime[]>([]);
   const heldAttackBtnsRef = useRef<Set<string>>(new Set());
   const recentAttackPressesRef = useRef<{ tok: string; time: number }[]>([]);
   const lastInputMetaRef = useRef<{ time: number; btnSet: Set<string> } | null>(null);
@@ -2127,6 +2635,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
   const joystickPointerIdRef = useRef<number | null>(null);
   const joystickHeldDirsRef = useRef<Set<string>>(new Set());
   const activeAttackPointersRef = useRef<Map<number, string>>(new Map());
+  const keymapMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const onResize = () => {
@@ -2153,17 +2662,30 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
   const playSoundByPair = (group: number, sample: number): boolean => {
     if (!sndData || !sndData.sounds.length) return false;
-    const match = sndData.sounds.find(s => s.group === group && s.sample === sample);
+    let match = sndData.sounds.find(s => s.group === group && s.sample === sample);
+    if (!match && group === 11) {
+      match = sndData.sounds.find(s => s.group === 11);
+    }
     if (!match) return false;
     try {
       if (audioPoolRef.current.length === 0) {
-        audioPoolRef.current = [new Audio(), new Audio(), new Audio(), new Audio()];
+        audioPoolRef.current = [
+          new Audio(),
+          new Audio(),
+          new Audio(),
+          new Audio(),
+          new Audio(),
+          new Audio(),
+          new Audio(),
+          new Audio(),
+        ];
       }
       const player = audioPoolRef.current[audioPoolIdxRef.current % audioPoolRef.current.length];
       audioPoolIdxRef.current++;
       const url = match.blobUrl || URL.createObjectURL(new Blob([match.data], { type: 'audio/wav' }));
       match.blobUrl = url;
       player.src = url;
+      player.currentTime = 0;
       player.play().catch(() => {});
       return true;
     } catch {
@@ -2265,16 +2787,19 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
   const syncP1ReactHud = () => {
     const p1 = p1Ref.current;
-    setActiveState(p1.stateNo);
-    setActiveAnimId(p1.animId);
-    setFrameIdx(p1.frameIdx);
-    setFacing(p1.facing);
-    setHudVelocity({
-      x: Number(p1.velX.toFixed(1)),
-      y: Number(p1.velY.toFixed(1)),
-      px: Math.round(p1.posX),
-      py: Math.round(p1.posY - 270),
-    });
+    const vx = Number(p1.velX.toFixed(1));
+    const vy = Number(p1.velY.toFixed(1));
+    const px = Math.round(p1.posX);
+    const py = Math.round(p1.posY - 270);
+    setActiveState(prev => (prev === p1.stateNo ? prev : p1.stateNo));
+    setActiveAnimId(prev => (prev === p1.animId ? prev : p1.animId));
+    setFrameIdx(prev => (prev === p1.frameIdx ? prev : p1.frameIdx));
+    setFacing(prev => (prev === p1.facing ? prev : p1.facing));
+    setHudVelocity(prev =>
+      prev.x === vx && prev.y === vy && prev.px === px && prev.py === py
+        ? prev
+        : { x: vx, y: vy, px, py }
+    );
   };
 
   const transitionFighterState = (
@@ -2293,13 +2818,21 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     f.tickInFrame = 0;
     f.stateTime = 0;
     f.firedPersist = new Set();
-    f.activeHitDef = null;
-    f.lastHitDefCtrlKey = '';
-    f.hitScoredThisWindow = false;
-    f.hitTargetsThisWindow = new Set();
-    f.moveContact = 0;
-    f.moveHit = 0;
-    f.moveGuarded = 0;
+    f.cmdBuffer = {};
+    f.landingVelY = 0;
+    const preserveHitDef = !options?.asHitOrGuard && Boolean(stateDef?.hitDefPersist);
+    const preserveMoveHit = !options?.asHitOrGuard && Boolean(stateDef?.hitDefPersist || stateDef?.moveHitPersist);
+    if (!preserveHitDef) {
+      f.activeHitDef = null;
+      f.lastHitDefCtrlKey = '';
+      f.hitScoredThisWindow = false;
+      f.hitTargetsThisWindow = new Set();
+    }
+    if (!preserveMoveHit) {
+      f.moveContact = 0;
+      f.moveHit = 0;
+      f.moveGuarded = 0;
+    }
     f.pendingLanding = false;
 
     if (targetState !== 100 && f.runLocked) {
@@ -2449,6 +2982,9 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     cameraXRef.current = 0;
     fightOutcomeRef.current = null;
     sparksRef.current = [];
+    projectilesRef.current = [];
+    helpersRef.current = [];
+    explodsRef.current = [];
     superPauseTicksRef.current = 0;
     superMoveTimeRef.current = 0;
     superCasterRef.current = null;
@@ -2470,9 +3006,15 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     setRunLocked(false);
     setMatchedMove(null);
     setIsHyperActive(false);
-    t1.forEach(f => transitionFighterState(f, 0));
+    t1.forEach(f => {
+      f.hasPlayedDeathSound = false;
+      transitionFighterState(f, 0);
+    });
     if (nextMode === 'fight') {
-      t2.forEach(f => transitionFighterState(f, 0));
+      t2.forEach(f => {
+        f.hasPlayedDeathSound = false;
+        transitionFighterState(f, 0);
+      });
     }
     setFightHud({
       team1: t1.map(makeMemberHud),
@@ -2860,6 +3402,110 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       if (lastPartCount > 0) {
         matchedCmdEntries.push({ cmd, lastPartCount });
         satisfiedCmdNames.add(cmdLower);
+      }
+    }
+
+    const buf = (p1.cmdBuffer = p1.cmdBuffer || {});
+    for (const cname of satisfiedCmdNames) {
+      buf[cname] = 10;
+    }
+    for (const btn of activeBtnSet) {
+      buf[btn] = 10;
+    }
+    buf[token.toLowerCase()] = 10;
+
+    // Allow in-state Command triggers (such as KFM's 1051 -> 1055 Kung Fu Knee air kick follow-up)
+    // to fire before Practice Mode free-cancels or Fight Mode ctrl-gate blocks them.
+    if (p1.ctrl === 0 && states[p1.stateNo]) {
+      const curStDef = states[p1.stateNo];
+      const act = airData?.actions[p1.animId];
+      let animTime = -1;
+      if (act && act.elements.length > 0) {
+        let hasInfinite = false;
+        let remaining = 0;
+        for (let i = p1.frameIdx; i < act.elements.length; i++) {
+          const t = act.elements[i]?.time ?? 1;
+          if (t < 0) {
+            hasInfinite = true;
+            break;
+          }
+          const dur = Math.max(1, t);
+          remaining += i === p1.frameIdx ? Math.max(1, dur - p1.tickInFrame) : dur;
+        }
+        animTime = hasInfinite ? -999999 : -Math.max(1, remaining);
+      }
+      const charDirsNow = getCharHeldDirs(p1);
+      const heldCmds = new Set<string>();
+      if (charDirsNow.has('F') || p1.runLocked) heldCmds.add('holdfwd');
+      if (charDirsNow.has('B')) heldCmds.add('holdback');
+      if (charDirsNow.has('U')) heldCmds.add('holdup');
+      if (charDirsNow.has('D')) heldCmds.add('holddown');
+      const pressedCmds = new Set<string>([
+        ...Array.from(satisfiedCmdNames),
+        ...Array.from(activeBtnSet),
+        token.toLowerCase(),
+        ...Object.keys(buf).filter(k => buf[k] > 0),
+      ]);
+      const opp = getNearestLivingOpponent(p1, team2Ref.current);
+      const inStateCtx: EvalContext = {
+        stateTime: p1.stateTime,
+        animElem: p1.frameIdx + 1,
+        animElemTick: p1.tickInFrame,
+        animId: p1.animId,
+        animTime,
+        posX: p1.posX,
+        posY: p1.posY - 270,
+        velX: p1.velX,
+        velY: p1.velY,
+        stateType: p1.stateType,
+        moveType: p1.moveType,
+        physics: p1.physics,
+        stateNo: p1.stateNo,
+        prevStateNo: p1.prevStateNo,
+        ctrl: p1.ctrl,
+        life: p1.life,
+        maxLife: p1.maxLife,
+        power: p1.power,
+        maxPower: p1.maxPower,
+        moveContact: p1.moveContact,
+        moveHit: p1.moveHit,
+        moveGuarded: p1.moveGuarded,
+        mode: modeRef.current,
+        p2BodyDistX: opp ? Math.max(0, Math.abs(opp.posX - p1.posX) - 24) : 120,
+        p2PosY: opp ? opp.posY - 270 : 0,
+        p2StateType: opp?.stateType,
+        p2MoveType: opp?.moveType,
+        p2StateNo: opp?.stateNo,
+        p2Life: opp?.life,
+        actElements: act?.elements,
+        constants,
+        heldCmds,
+        pressedCmds,
+        isHelper: p1.isHelper,
+        helperId: p1.helperId,
+        ownerId: p1.ownerId || p1.id,
+        helpers: helpersRef.current,
+        explods: explodsRef.current,
+        projectiles: projectilesRef.current,
+        parentLife: p1.life,
+        facing: p1.facing,
+      };
+      for (const ctrl of curStDef.controllers) {
+        if (ctrl.type !== 'changestate') continue;
+        if (ctrl.persistent === 0 && p1.firedPersist.has(ctrl.id)) continue;
+        const trigText = [
+          ...ctrl.triggerAll,
+          ...(Object.values(ctrl.triggerGroups) as string[][]).flat(),
+        ];
+        if (!trigText.some(t => /\bcommand\s*=/i.test(t))) continue;
+        if (!doesControllerFire(ctrl, inStateCtx)) continue;
+        const nextS = evalMugenNumber(ctrl.valueExpr, inStateCtx);
+        if (nextS !== null && nextS !== p1.stateNo) {
+          if (ctrl.persistent === 0) p1.firedPersist.add(ctrl.id);
+          transitionFighterState(p1, nextS);
+          if (ctrl.ctrlVal !== undefined) p1.ctrl = ctrl.ctrlVal;
+          return;
+        }
       }
     }
 
@@ -3370,6 +4016,11 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
         if (charDirsNow.has('B')) heldCmds.add('holdback');
         if (charDirsNow.has('U')) heldCmds.add('holdup');
         if (charDirsNow.has('D')) heldCmds.add('holddown');
+        const pressedCmds = new Set<string>(
+          Object.entries(f.cmdBuffer || {})
+            .filter(([, ticks]) => ticks > 0)
+            .map(([name]) => name)
+        );
 
         const ctx: EvalContext = {
           stateTime: f.stateTime,
@@ -3404,6 +4055,17 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           actElements: act?.elements,
           constants,
           heldCmds,
+          pressedCmds,
+          isHelper: f.isHelper,
+          helperId: f.helperId,
+          ownerId: f.ownerId || f.id,
+          helpers: helpersRef.current,
+          explods: explodsRef.current,
+          projectiles: projectilesRef.current,
+          parentLife: f.isHelper
+            ? (f.ownerId ? ([...team1Ref.current, ...team2Ref.current].find(o => o.id === f.ownerId)?.life ?? 1000) : 1000)
+            : f.life,
+          facing: f.facing,
         };
 
         let transitioned = false;
@@ -3513,9 +4175,204 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
             const nextS = evalMugenNumber(ctrl.valueExpr, ctx);
             if (nextS !== null && nextS !== f.stateNo) {
               transitionFighterState(f, nextS);
+              if (ctrl.ctrlVal !== undefined) f.ctrl = ctrl.ctrlVal;
               transitionsThisTick++;
               transitioned = true;
               break;
+            }
+          } else if (ctrl.type === 'projectile') {
+            const pKey = `proj-${ctrl.id}-e${ctx.animElem}-t${f.stateTime}`;
+            const allTrigLines = [
+              ...ctrl.triggerAll,
+              ...(Object.values(ctrl.triggerGroups) as string[][]).flat(),
+            ];
+            const hasElemOrTime = allTrigLines.some(t => /animelem|time/i.test(t));
+            const dedupKey = hasElemOrTime ? pKey : `proj-${ctrl.id}`;
+            if (!f.firedPersist.has(dedupKey)) {
+              f.firedPersist.add(dedupKey);
+
+              const offX = ctrl.projOffsetX ?? 40;
+              const offY = ctrl.projOffsetY ?? -55;
+              const vx = ctrl.projVelX ?? 5.2;
+              const vy = ctrl.projVelY ?? 0;
+              const pAnim = ctrl.projAnim ?? (airData?.actions[1005] ? 1005 : f.animId);
+              const maxTicks = ctrl.projRemoveTime !== undefined && ctrl.projRemoveTime > 0 ? ctrl.projRemoveTime : 180;
+
+              const hitDefToUse = ctrl.hitDef || {
+                attr: (f.stateType === 'A' ? 'A' : f.stateType === 'C' ? 'C' : 'S') as 'S' | 'C' | 'A',
+                attrMove: (stDef?.isHyper || f.stateNo >= 3000 ? 'H' : f.stateNo >= 1000 ? 'S' : 'N') as 'N' | 'S' | 'H',
+                hitFlag: 'MAF',
+                guardFlag: 'MA',
+                damage: stDef?.isHyper ? 130 : 70,
+                guardDamage: stDef?.isHyper ? 16 : 10,
+                getPowerHit: 40,
+                getPowerGuard: 20,
+                givePowerHit: 20,
+                givePowerGuard: 10,
+                pauseP1: 0,
+                pauseP2: 10,
+                groundVelX: -5.5,
+                groundVelY: 0,
+                airVelX: -3.5,
+                airVelY: -4.5,
+                guardVelX: -4,
+                groundHittime: 14,
+                airHittime: 16,
+                guardHittime: 12,
+                fall: false,
+              };
+
+              projectilesRef.current.push({
+                id: `proj-${f.id}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                projId: ctrl.projId ?? 0,
+                ownerId: f.id,
+                team: f.team,
+                posX: f.posX + offX * f.facing,
+                posY: f.posY + offY,
+                velX: vx,
+                velY: vy,
+                facing: f.facing,
+                animId: pAnim,
+                hitAnimId: ctrl.projHitAnim,
+                remAnimId: ctrl.projRemAnim,
+                cancelAnimId: ctrl.projCancelAnim,
+                frameIdx: 0,
+                tickInFrame: 0,
+                lifeTicks: 0,
+                maxTicks,
+                hitDef: hitDefToUse,
+                isHitOrDying: false,
+                hitTargets: new Set(),
+              });
+            }
+          } else if (ctrl.type === 'helper') {
+            const hId = ctrl.helperId ?? 0;
+            const hKey = `helper-${ctrl.id}-e${ctx.animElem}-t${f.stateTime}`;
+            const allTrigLines = [
+              ...ctrl.triggerAll,
+              ...(Object.values(ctrl.triggerGroups) as string[][]).flat(),
+            ];
+            const hasElemOrTime = allTrigLines.some(t => /animelem|time/i.test(t));
+            const dedupKey = hasElemOrTime ? hKey : `helper-${ctrl.id}`;
+            if (!f.firedPersist.has(dedupKey)) {
+              f.firedPersist.add(dedupKey);
+
+              const spawnStateNo = ctrl.helperStateNo ?? f.stateNo;
+              const offX = ctrl.helperOffsetX ?? 0;
+              const offY = ctrl.helperOffsetY ?? 0;
+              let spawnX = f.posX + offX * f.facing;
+              let spawnY = f.posY + offY;
+              if (ctrl.helperPosType === 'p2') {
+                spawnX = opp.posX + offX * opp.facing;
+                spawnY = opp.posY + offY;
+              }
+              const spawnFacing: 1 | -1 = ctrl.helperFacing === -1 ? (f.facing === 1 ? -1 : 1) : f.facing;
+              const helperStateDef = states[spawnStateNo];
+              const helperAnim = helperStateDef?.anim ?? spawnStateNo;
+
+              const newHelper: FighterRuntime = {
+                id: `helper-${f.id}-${hId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                team: f.team,
+                slotIdx: f.slotIdx,
+                isPlayer: false,
+                isHelper: true,
+                helperId: hId,
+                ownerId: f.id,
+                hasPlayedDeathSound: false,
+                posX: spawnX,
+                posY: spawnY,
+                velX: helperStateDef?.velSetX ?? 0,
+                velY: helperStateDef?.velSetY ?? 0,
+                facing: spawnFacing,
+                stateNo: spawnStateNo,
+                prevStateNo: 0,
+                animId: airData?.actions[helperAnim] ? helperAnim : f.animId,
+                frameIdx: 0,
+                tickInFrame: 0,
+                stateTime: 0,
+                stateType: helperStateDef?.stateType ?? 'A',
+                moveType: helperStateDef?.moveType ?? 'A',
+                physics: helperStateDef?.physics ?? 'N',
+                ctrl: 0,
+                life: 1000,
+                trailLife: 1000,
+                maxLife: 1000,
+                power: f.power,
+                maxPower: f.maxPower,
+                attackMul: f.attackMul,
+                defenceMul: f.defenceMul,
+                hitPauseTicks: 0,
+                hitStunTicks: 0,
+                lieDownPhase: 'none',
+                lieDownTimer: 0,
+                invulnTicks: 0,
+                comboCount: 0,
+                activeHitDef: null,
+                lastHitDefCtrlKey: '',
+                hitScoredThisWindow: false,
+                hitTargetsThisWindow: new Set(),
+                moveContact: 0,
+                moveHit: 0,
+                moveGuarded: 0,
+                firedPersist: new Set(),
+                heldDirs: new Set(),
+                crouchLocked: false,
+                runLocked: false,
+                aiActionTimer: 0,
+                aiCooldown: 0,
+                aiWalkDir: 0,
+                aiHoldDown: false,
+                aiBlockTimer: 0,
+              };
+              helpersRef.current.push(newHelper);
+            }
+          } else if (ctrl.type === 'explod') {
+            const exAnim = ctrl.explodAnim ?? f.animId;
+            const offX = ctrl.explodOffsetX ?? 0;
+            const offY = ctrl.explodOffsetY ?? 0;
+            let exPosX = f.posX + offX * f.facing;
+            let exPosY = f.posY + offY;
+            if (ctrl.explodPosType === 'p2') {
+              exPosX = opp.posX + offX * opp.facing;
+              exPosY = opp.posY + offY;
+            }
+            const ownerPos = ctrl.explodPosType === 'p2' ? opp : f;
+            if (explodsRef.current.length > 80) {
+              explodsRef.current = explodsRef.current.slice(-79);
+            }
+            explodsRef.current.push({
+              id: `explod-${f.id}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              explodId: ctrl.explodId ?? 0,
+              ownerId: f.id,
+              team: f.team,
+              animId: exAnim,
+              posX: exPosX,
+              posY: exPosY,
+              velX: ctrl.explodVelX ?? 0,
+              velY: ctrl.explodVelY ?? 0,
+              facing: ctrl.explodFacing === -1 ? (f.facing === 1 ? -1 : 1) : f.facing,
+              vfacing: ctrl.explodVFacing ?? 1,
+              bindTime: ctrl.explodBindTime ?? 0,
+              removeTime: ctrl.explodRemoveTime ?? -2,
+              scaleX: ctrl.explodScaleX ?? 1,
+              scaleY: ctrl.explodScaleY ?? 1,
+              sprPriority: ctrl.explodSprPriority ?? 3,
+              frameIdx: 0,
+              tickInFrame: 0,
+              ageTicks: 0,
+              ownerLastX: ownerPos.posX,
+              ownerLastY: ownerPos.posY,
+            });
+          } else if (ctrl.type === 'removeexplod') {
+            const targetId = ctrl.explodId;
+            if (targetId !== undefined && targetId !== -1) {
+              explodsRef.current = explodsRef.current.filter(e => !(e.ownerId === f.id && e.explodId === targetId));
+            } else {
+              explodsRef.current = explodsRef.current.filter(e => e.ownerId !== f.id);
+            }
+          } else if (ctrl.type === 'destroyself') {
+            if (f.isHelper) {
+              f.life = 0;
             }
           }
         }
@@ -3648,6 +4505,12 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
     const stepFighter = (f: FighterRuntime, opp: FighterRuntime) => {
       if (f.invulnTicks > 0) f.invulnTicks--;
+      if (f.cmdBuffer) {
+        for (const k of Object.keys(f.cmdBuffer)) {
+          if (f.cmdBuffer[k] > 1) f.cmdBuffer[k]--;
+          else delete f.cmdBuffer[k];
+        }
+      }
 
       // Smoothly decay trailing life bar
       if (f.trailLife > f.life) {
@@ -3710,6 +4573,11 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           } else if (f.lieDownPhase === 'lie' && f.lieDownTimer <= 0) {
             if (f.life <= 0) {
               f.lieDownPhase = 'ko';
+              if (!f.hasPlayedDeathSound) {
+                f.hasPlayedDeathSound = true;
+                const playedDeath = playSoundByPair(11, 0);
+                if (!playedDeath) playSynthImpact('ko');
+              }
               transitionFighterState(f, 5150, { asHitOrGuard: true });
             } else {
               f.lieDownPhase = 'getup';
@@ -3743,6 +4611,11 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
             f.velX = 0;
             if (f.life <= 0) {
               f.lieDownPhase = 'ko';
+              if (!f.hasPlayedDeathSound) {
+                f.hasPlayedDeathSound = true;
+                const playedDeath = playSoundByPair(11, 0);
+                if (!playedDeath) playSynthImpact('ko');
+              }
               transitionFighterState(f, 5150, { asHitOrGuard: true });
             } else {
               f.lieDownPhase = 'bounce';
@@ -3859,6 +4732,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
             (f.stateNo >= 600 && f.stateNo < 700) ||
             prevVelY > 0
           ) {
+            f.landingVelY = prevVelY;
             f.pendingLanding = true;
           }
         }
@@ -3879,6 +4753,8 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
       if (f.pendingLanding) {
         f.pendingLanding = false;
+        const landVelY = f.landingVelY || 0;
+        f.landingVelY = 0;
         if (f.stateNo === 105) {
           f.velX = 0;
           f.velY = 0;
@@ -3892,12 +4768,20 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           return;
         }
         const beforeLandState = f.stateNo;
+        f.velY = landVelY > 0 ? landVelY : 0.1;
         runControllersForFighter(f, opp);
         if (f.stateNo !== beforeLandState) {
+          if (f.posY >= 270 && f.velY > 0) f.velY = 0;
           return;
         }
         if (f.posY >= 270 && f.velY >= 0) {
           f.velY = 0;
+        }
+        if (f.stateType === 'A' && f.posY >= 270) {
+          f.velX = 0;
+          f.velY = 0;
+          transitionFighterState(f, downNow ? 11 : 0);
+          return;
         }
       }
 
@@ -3970,6 +4854,11 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
                   if (charDirsNow.has('B')) heldCmds.add('holdback');
                   if (charDirsNow.has('U')) heldCmds.add('holdup');
                   if (charDirsNow.has('D')) heldCmds.add('holddown');
+                  const pressedCmds = new Set<string>(
+                    Object.entries(f.cmdBuffer || {})
+                      .filter(([, t]) => t > 0)
+                      .map(([name]) => name)
+                  );
                   const endCtx: EvalContext = {
                     stateTime: f.stateTime,
                     animElem: f.frameIdx + 1,
@@ -4003,6 +4892,17 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
                     actElements: act.elements,
                     constants,
                     heldCmds,
+                    pressedCmds,
+                    isHelper: f.isHelper,
+                    helperId: f.helperId,
+                    ownerId: f.ownerId || f.id,
+                    helpers: helpersRef.current,
+                    explods: explodsRef.current,
+                    projectiles: projectilesRef.current,
+                    parentLife: f.isHelper
+                      ? (f.ownerId ? ([...team1Ref.current, ...team2Ref.current].find(o => o.id === f.ownerId)?.life ?? 1000) : 1000)
+                      : f.life,
+                    facing: f.facing,
                   };
                   for (const ctrl of stDef.controllers) {
                     if (ctrl.type !== 'changestate') continue;
@@ -4016,6 +4916,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
                     const nextS = evalMugenNumber(ctrl.valueExpr, endCtx);
                     if (nextS !== null && nextS !== f.stateNo) {
                       transitionFighterState(f, nextS);
+                      if (ctrl.ctrlVal !== undefined) f.ctrl = ctrl.ctrlVal;
                       return;
                     }
                   }
@@ -4031,6 +4932,9 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
                   f.stateType === 'A';
                 if (nextOnEnd !== f.stateNo && nextOnEnd !== 0 && (states[nextOnEnd] || airData?.actions[nextOnEnd])) {
                   transitionFighterState(f, nextOnEnd);
+                } else if (f.isHelper) {
+                  f.life = 0;
+                  return;
                 } else if (stillAirborne && (isAirHoldState || (stDef && stDef.controllers.some(c => c.type === 'changestate')))) {
                   f.frameIdx = act.elements.length - 1;
                 } else {
@@ -4054,7 +4958,20 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
     const getAtkBoxes = (f: FighterRuntime): ClsnBox[] => {
       const act = airData?.actions[f.animId];
       const el = act?.elements[f.frameIdx];
-      return el?.clsn1 ?? act?.clsn1 ?? [];
+      const boxes = el?.clsn1 ?? act?.clsn1 ?? [];
+      if (boxes.length > 0) return boxes;
+      if (f.isHelper && f.moveType === 'A') {
+        return [{ id: 0, x1: -18, y1: -18, x2: 18, y2: 18 }];
+      }
+      return [];
+    };
+
+    const getProjectileAtkBoxes = (p: ProjectileRuntime): ClsnBox[] => {
+      const act = airData?.actions[p.animId];
+      const el = act?.elements[p.frameIdx];
+      const boxes = el?.clsn1 ?? act?.clsn1 ?? [];
+      if (boxes.length > 0) return boxes;
+      return [{ id: 0, x1: -18, y1: -18, x2: 18, y2: 18 }];
     };
 
     const resolveHit = (atk: FighterRuntime, def: FighterRuntime) => {
@@ -4169,7 +5086,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
         isHyper: hitDef.attrMove === 'H',
       });
 
-      if (isGuarded) {
+      if (isGuarded && def.life > 0) {
         atk.moveGuarded = 1;
         const played = hitDef.guardSound ? playSoundByPair(hitDef.guardSound.group, hitDef.guardSound.sample) : false;
         if (!played) playSynthImpact('guard');
@@ -4181,7 +5098,13 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
         atk.moveHit = 1;
         def.comboCount = def.moveType === 'H' ? def.comboCount + 1 : 1;
         const played = hitDef.hitSound ? playSoundByPair(hitDef.hitSound.group, hitDef.hitSound.sample) : false;
-        if (!played) playSynthImpact(def.life <= 0 ? 'ko' : 'hit');
+        if (!played && def.life > 0) playSynthImpact('hit');
+
+        if (def.life <= 0 && !def.hasPlayedDeathSound) {
+          def.hasPlayedDeathSound = true;
+          const playedDeath = playSoundByPair(11, 0);
+          if (!playedDeath) playSynthImpact('ko');
+        }
 
         if (def.life <= 0 || def.posY < 270 || hitDef.fall || hitDef.groundVelY < 0) {
           transitionFighterState(def, 5050, { asHitOrGuard: true });
@@ -4202,6 +5125,247 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       }
     };
 
+    const applyProjectileHit = (
+      proj: ProjectileRuntime,
+      def: FighterRuntime,
+      hitPoint: { x: number; y: number }
+    ) => {
+      const hitDef = proj.hitDef;
+      const defDirs = getCharHeldDirs(def);
+      const canBlockState =
+        def.ctrl === 1 ||
+        def.stateNo === 120 ||
+        def.stateNo === 130 ||
+        def.stateNo === 131 ||
+        def.stateNo === 132 ||
+        def.stateNo === 150 ||
+        def.stateNo === 152 ||
+        def.stateNo === 154;
+
+      let isGuarded = false;
+      if (canBlockState && def.moveType === 'I' && defDirs.has('B') && hitDef.guardFlag.length > 0) {
+        if (def.posY < 270) {
+          isGuarded = hitDef.guardFlag.includes('A');
+        } else if (defDirs.has('D')) {
+          isGuarded = hitDef.guardFlag.includes('L') || hitDef.guardFlag.includes('M');
+        } else {
+          isGuarded = hitDef.guardFlag.includes('H') || hitDef.guardFlag.includes('M');
+        }
+      }
+
+      const rawBaseDmg = isGuarded ? hitDef.guardDamage : hitDef.damage;
+      const scaledDmg =
+        rawBaseDmg > 0 ? Math.max(1, Math.round(rawBaseDmg * (1 / Math.max(0.1, def.defenceMul)))) : 0;
+
+      def.life = Math.max(0, def.life - scaledDmg);
+      def.power = Math.min(def.maxPower, def.power + (isGuarded ? hitDef.givePowerGuard : hitDef.givePowerHit));
+      def.hitPauseTicks = Math.max(2, Math.min(18, hitDef.pauseP2));
+
+      sparksRef.current.push({
+        x: hitPoint.x,
+        y: hitPoint.y,
+        age: 0,
+        maxAge: 14,
+        guarded: isGuarded,
+        isHyper: hitDef.attrMove === 'H',
+      });
+
+      if (isGuarded && def.life > 0) {
+        const played = hitDef.guardSound ? playSoundByPair(hitDef.guardSound.group, hitDef.guardSound.sample) : false;
+        if (!played) playSynthImpact('guard');
+        const guardState = def.posY < 270 ? 154 : defDirs.has('D') ? 152 : 150;
+        transitionFighterState(def, guardState, { asHitOrGuard: true });
+        def.velX = hitDef.guardVelX;
+        def.hitStunTicks = hitDef.guardHittime;
+      } else {
+        def.comboCount = def.moveType === 'H' ? def.comboCount + 1 : 1;
+        const played = hitDef.hitSound ? playSoundByPair(hitDef.hitSound.group, hitDef.hitSound.sample) : false;
+        if (!played && def.life > 0) playSynthImpact('hit');
+
+        // Play death sound (11, 0)
+        if (def.life <= 0 && !def.hasPlayedDeathSound) {
+          def.hasPlayedDeathSound = true;
+          const playedDeath = playSoundByPair(11, 0);
+          if (!playedDeath) playSynthImpact('ko');
+        }
+
+        if (def.life <= 0 || def.posY < 270 || hitDef.fall || hitDef.groundVelY < 0) {
+          transitionFighterState(def, 5050, { asHitOrGuard: true });
+          def.velX = def.posY < 270 ? hitDef.airVelX : (hitDef.groundVelX || hitDef.airVelX);
+          def.velY = hitDef.airVelY < 0 ? hitDef.airVelY : -4.8;
+          def.hitStunTicks = hitDef.airHittime;
+          if (def.life <= 0) {
+            def.hitPauseTicks = 14;
+          }
+        } else {
+          const hitState = def.stateType === 'C' ? 5010 : 5000;
+          transitionFighterState(def, hitState, { asHitOrGuard: true });
+          def.velX = hitDef.groundVelX;
+          def.velY = 0;
+          def.hitStunTicks = hitDef.groundHittime;
+        }
+      }
+    };
+
+    const drawProjectile = (
+      ctx: CanvasRenderingContext2D,
+      p: ProjectileRuntime,
+      camX: number,
+      canvasW: number,
+      scale: number,
+      fighterPal: Uint8Array | null
+    ) => {
+      const screenX = canvasW / 2 + (p.posX - camX) * scale;
+      const screenY = 270 + (p.posY - 270) * scale;
+
+      const act = airData?.actions[p.animId];
+      const el = act?.elements[p.frameIdx];
+      let drewSprite = false;
+
+      if (act && el && sffData) {
+        const sprite = sffData.images.find(img => img.group === el.group && img.image === el.image);
+        if (sprite && sprite.pixelIndices && sprite.width > 0 && sprite.height > 0) {
+          const pal =
+            sprite.group >= 7000 && sprite.isSharedPalette === false && sprite.palette
+              ? sprite.palette
+              : (fighterPal || sprite.palette || sffData.palettes?.[0]?.data);
+          if (pal) {
+            const imgData = applyPalette(sprite.pixelIndices, sprite.width, sprite.height, pal);
+            const off = document.createElement('canvas');
+            off.width = sprite.width;
+            off.height = sprite.height;
+            const octx = off.getContext('2d');
+            if (octx) {
+              octx.putImageData(imgData, 0, 0);
+              const flipStr = (el.flip || '').toUpperCase();
+              const flipH = (p.facing === -1) !== flipStr.includes('H');
+              const flipV = flipStr.includes('V');
+
+              ctx.save();
+              ctx.translate(screenX, screenY);
+              ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+              ctx.imageSmoothingEnabled = false;
+              ctx.drawImage(
+                off,
+                (el.xOffset - sprite.xOffset) * scale,
+                (el.yOffset - sprite.yOffset) * scale,
+                sprite.width * scale,
+                sprite.height * scale
+              );
+              ctx.restore();
+              drewSprite = true;
+            }
+          }
+        }
+      }
+
+      if (!drewSprite) {
+        ctx.save();
+        ctx.translate(screenX, screenY);
+        ctx.scale(p.facing, 1);
+
+        const isCyan = p.team === 1;
+        const outerGrad = ctx.createRadialGradient(0, 0, 4 * scale, 0, 0, 22 * scale);
+        outerGrad.addColorStop(0, '#ffffff');
+        outerGrad.addColorStop(0.35, isCyan ? '#38bdf8' : '#fb923c');
+        outerGrad.addColorStop(0.7, isCyan ? '#0284c7' : '#ea580c');
+        outerGrad.addColorStop(1, 'rgba(2, 132, 199, 0)');
+        ctx.fillStyle = outerGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, 22 * scale, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = isCyan ? 'rgba(56, 189, 248, 0.45)' : 'rgba(251, 146, 60, 0.45)';
+        ctx.beginPath();
+        ctx.moveTo(0, -10 * scale);
+        ctx.quadraticCurveTo(-18 * scale, -14 * scale, -28 * scale, 0);
+        ctx.quadraticCurveTo(-18 * scale, 14 * scale, 0, 10 * scale);
+        ctx.closePath();
+        ctx.fill();
+
+        const coreGrad = ctx.createRadialGradient(-3 * scale, 0, 1, 0, 0, 9 * scale);
+        coreGrad.addColorStop(0, '#ffffff');
+        coreGrad.addColorStop(0.7, isCyan ? '#bae6fd' : '#fed7aa');
+        coreGrad.addColorStop(1, isCyan ? '#38bdf8' : '#fb923c');
+        ctx.fillStyle = coreGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, 9 * scale, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+      }
+
+      if (showClsn) {
+        ctx.save();
+        ctx.translate(screenX, screenY);
+        if (p.facing === -1) ctx.scale(-1, 1);
+        ctx.strokeStyle = '#ef4444';
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.25)';
+        ctx.lineWidth = 1.5;
+        const actEl = act?.elements[p.frameIdx];
+        const rawBoxes = (actEl?.clsn1 ?? act?.clsn1 ?? []).length > 0 ? (actEl?.clsn1 ?? act?.clsn1!) : [{ id: 0, x1: -18, y1: -18, x2: 18, y2: 18 }];
+        for (const b of rawBoxes) {
+          const bx = Math.min(b.x1, b.x2) * scale;
+          const by = Math.min(b.y1, b.y2) * scale;
+          const bw = Math.abs(b.x2 - b.x1) * scale;
+          const bh = Math.abs(b.y2 - b.y1) * scale;
+          ctx.fillRect(bx, by, bw, bh);
+          ctx.strokeRect(bx, by, bw, bh);
+        }
+        ctx.restore();
+      }
+    };
+
+    const drawExplod = (
+      ctx: CanvasRenderingContext2D,
+      ex: ExplodRuntime,
+      camX: number,
+      canvasW: number,
+      scale: number,
+      fighterPal: Uint8Array | null
+    ) => {
+      const screenX = canvasW / 2 + (ex.posX - camX) * scale;
+      const screenY = 270 + (ex.posY - 270) * scale;
+
+      const act = airData?.actions[ex.animId];
+      const el = act?.elements[ex.frameIdx];
+      if (act && el && sffData) {
+        const sprite = sffData.images.find(img => img.group === el.group && img.image === el.image);
+        if (sprite && sprite.pixelIndices && sprite.width > 0 && sprite.height > 0) {
+          const pal =
+            sprite.group >= 7000 && sprite.isSharedPalette === false && sprite.palette
+              ? sprite.palette
+              : (fighterPal || sprite.palette || sffData.palettes?.[0]?.data);
+          if (pal) {
+            const imgData = applyPalette(sprite.pixelIndices, sprite.width, sprite.height, pal);
+            const off = document.createElement('canvas');
+            off.width = sprite.width;
+            off.height = sprite.height;
+            const octx = off.getContext('2d');
+            if (octx) {
+              octx.putImageData(imgData, 0, 0);
+              const flipStr = (el.flip || '').toUpperCase();
+              const flipH = (ex.facing === -1) !== flipStr.includes('H');
+              const flipV = (ex.vfacing === -1) !== flipStr.includes('V');
+
+              ctx.save();
+              ctx.translate(screenX, screenY);
+              ctx.scale((flipH ? -1 : 1) * ex.scaleX, (flipV ? -1 : 1) * ex.scaleY);
+              ctx.imageSmoothingEnabled = false;
+              ctx.drawImage(
+                off,
+                (el.xOffset - sprite.xOffset) * scale,
+                (el.yOffset - sprite.yOffset) * scale,
+                sprite.width * scale,
+                sprite.height * scale
+              );
+              ctx.restore();
+            }
+          }
+        }
+      }
+    };
+
     const drawFighter = (
       ctx: CanvasRenderingContext2D,
       f: FighterRuntime,
@@ -4213,15 +5377,18 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       const screenX = canvasW / 2 + (f.posX - camX) * scale;
       const screenY = 270 + (f.posY - 270) * scale;
 
-      const airDist = Math.max(0, 270 - f.posY);
-      const shadowScale = Math.max(0.45, 1 - airDist / 160);
-      ctx.fillStyle = 'rgba(0,0,0,0.48)';
-      ctx.beginPath();
-      ctx.ellipse(screenX, 274, 28 * shadowScale, 7 * shadowScale, 0, 0, Math.PI * 2);
-      ctx.fill();
+      if (!f.isHelper) {
+        const airDist = Math.max(0, 270 - f.posY);
+        const shadowScale = Math.max(0.45, 1 - airDist / 160);
+        ctx.fillStyle = 'rgba(0,0,0,0.48)';
+        ctx.beginPath();
+        ctx.ellipse(screenX, 274, 28 * shadowScale, 7 * shadowScale, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
 
       const act = airData?.actions[f.animId];
       const el = act?.elements[f.frameIdx];
+      let drewHelperSprite = false;
       if (act && el && sffData) {
         const sprite = sffData.images.find(img => img.group === el.group && img.image === el.image);
         if (sprite && sprite.pixelIndices && sprite.width > 0 && sprite.height > 0) {
@@ -4254,6 +5421,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
                 sprite.height * scale
               );
               ctx.restore();
+              drewHelperSprite = true;
             }
           }
         }
@@ -4284,8 +5452,24 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
         }
       }
 
+      if (f.isHelper && !drewHelperSprite) {
+        ctx.save();
+        ctx.translate(screenX, screenY);
+        ctx.scale(f.facing, 1);
+        const isCyan = f.team === 1;
+        const grad = ctx.createRadialGradient(0, 0, 2 * scale, 0, 0, 18 * scale);
+        grad.addColorStop(0, '#ffffff');
+        grad.addColorStop(0.45, isCyan ? '#38bdf8' : '#fb923c');
+        grad.addColorStop(1, 'rgba(56, 189, 248, 0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(0, 0, 18 * scale, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
       // Draw role tag above fighters in 2v2 / 3v3 / 4v4 battles
-      if (modeRef.current === 'fight' && teamSizeRef.current > 1 && f.life > 0) {
+      if (!f.isHelper && modeRef.current === 'fight' && teamSizeRef.current > 1 && f.life > 0) {
         const tagText = f.isPlayer
           ? 'P1'
           : f.team === 1
@@ -4437,6 +5621,142 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
             }
             advanceFighterAnim(p1, p2);
           }
+
+          // Step active Helpers (in both Fight & Practice modes)
+          if (helpersRef.current.length > 0) {
+            for (const h of helpersRef.current) {
+              if (h.life <= 0) continue;
+              const hOppTeam = h.team === 1 ? team2 : team1;
+              const hOpp = getNearestLivingOpponent(h, hOppTeam);
+              stepFighter(h, hOpp);
+              if (isFight && h.life > 0) {
+                for (const def of hOppTeam) {
+                  if (def.life > 0) resolveHit(h, def);
+                }
+              }
+              if (h.life > 0) {
+                advanceFighterAnim(h, hOpp);
+              }
+            }
+            helpersRef.current = helpersRef.current.filter(
+              h => h.life > 0 && Math.abs(h.posX - cameraXRef.current) < 480 && Math.abs(h.posX) < 1200 && h.stateTime < 600
+            );
+          }
+
+          // Step active Projectiles (Hadoken balls, energy blasts, etc.)
+          if (projectilesRef.current.length > 0) {
+            for (const p of projectilesRef.current) {
+              p.lifeTicks++;
+              if (!p.isHitOrDying) {
+                p.posX += p.velX * p.facing;
+                p.posY += p.velY;
+
+                if (isFight) {
+                  const pOppTeam = p.team === 1 ? team2 : team1;
+                  const atkBoxes = getProjectileAtkBoxes(p);
+                  for (const def of pOppTeam) {
+                    if (
+                      def.life <= 0 ||
+                      def.invulnTicks > 0 ||
+                      def.stateNo === 5110 ||
+                      def.stateNo === 5120 ||
+                      def.stateNo === 5150 ||
+                      p.hitTargets.has(def.id)
+                    ) {
+                      continue;
+                    }
+                    const defBoxes = getHurtBoxes(def);
+                    const hitPt = findBoxesOverlap(atkBoxes, p, defBoxes, def);
+                    if (hitPt) {
+                      p.hitTargets.add(def.id);
+                      applyProjectileHit(p, def, hitPt);
+                      p.isHitOrDying = true;
+                      if (p.hitAnimId !== undefined && airData?.actions[p.hitAnimId]) {
+                        p.animId = p.hitAnimId;
+                        p.frameIdx = 0;
+                        p.tickInFrame = 0;
+                        p.velX = 0;
+                        p.velY = 0;
+                      } else {
+                        p.lifeTicks = p.maxTicks;
+                      }
+                      break;
+                    }
+                  }
+                }
+              }
+
+              // Advance projectile AIR animation
+              const act = airData?.actions[p.animId];
+              if (act && act.elements.length > 0) {
+                const el = act.elements[p.frameIdx] || act.elements[0];
+                const ticks = el.time < 0 ? 999999 : Math.max(1, el.time);
+                p.tickInFrame++;
+                if (p.tickInFrame >= ticks) {
+                  p.tickInFrame = 0;
+                  if (p.frameIdx + 1 < act.elements.length) {
+                    p.frameIdx++;
+                  } else if (!p.isHitOrDying) {
+                    p.frameIdx = act.loopstartIndex !== undefined ? act.loopstartIndex : 0;
+                  } else {
+                    p.lifeTicks = p.maxTicks;
+                  }
+                }
+              }
+            }
+            projectilesRef.current = projectilesRef.current.filter(
+              p => p.lifeTicks < p.maxTicks && Math.abs(p.posX - cameraXRef.current) < 520 && Math.abs(p.posX) < 1200
+            );
+          }
+
+          // Step active Explods (aura, fire trails, energy bursts, hit FX)
+          if (explodsRef.current.length > 0) {
+            const allOwners = [...team1, ...team2, ...helpersRef.current];
+            const nextExplods: ExplodRuntime[] = [];
+            for (const ex of explodsRef.current) {
+              ex.ageTicks++;
+              let alive = ex.removeTime > 0 ? ex.ageTicks < ex.removeTime : true;
+
+              if (ex.bindTime !== 0 && (ex.bindTime < 0 || ex.ageTicks <= ex.bindTime)) {
+                const owner = allOwners.find(o => o.id === ex.ownerId);
+                if (owner) {
+                  if (ex.ownerLastX !== undefined && ex.ownerLastY !== undefined) {
+                    ex.posX += owner.posX - ex.ownerLastX;
+                    ex.posY += owner.posY - ex.ownerLastY;
+                  }
+                  ex.ownerLastX = owner.posX;
+                  ex.ownerLastY = owner.posY;
+                }
+              } else {
+                ex.posX += ex.velX * ex.facing;
+                ex.posY += ex.velY;
+              }
+
+              const act = airData?.actions[ex.animId];
+              if (act && act.elements.length > 0) {
+                const el = act.elements[ex.frameIdx] || act.elements[0];
+                const ticks = el.time < 0 ? 999999 : Math.max(1, el.time);
+                ex.tickInFrame++;
+                if (ex.tickInFrame >= ticks) {
+                  ex.tickInFrame = 0;
+                  if (ex.frameIdx + 1 < act.elements.length) {
+                    ex.frameIdx++;
+                  } else if (ex.removeTime === -2) {
+                    alive = false;
+                  } else {
+                    ex.frameIdx = act.loopstartIndex !== undefined ? act.loopstartIndex : 0;
+                  }
+                }
+              } else if (ex.removeTime <= 0 && ex.ageTicks >= 20) {
+                alive = false;
+              }
+
+              if (alive && ex.ageTicks < 600) {
+                nextExplods.push(ex);
+              }
+            }
+            explodsRef.current = nextExplods;
+          }
         }
 
         // Advance hit/guard sparks
@@ -4453,22 +5773,62 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
             const leadP2 = p2Ref.current;
             const team1Combo = Math.max(0, ...team2.map(f => f.comboCount));
             const team2Combo = Math.max(0, ...team1.map(f => f.comboCount));
-            setFightHud({
-              team1: team1.map(makeMemberHud),
-              team2: team2.map(makeMemberHud),
-              p1Life: Math.ceil(p1.life),
-              p1Trail: Math.ceil(p1.trailLife),
-              p1MaxLife: p1.maxLife,
-              p1Power: Math.floor(p1.power),
-              p1MaxPower: p1.maxPower,
-              p1Combo: team1Combo,
-              p2Life: Math.ceil(leadP2.life),
-              p2Trail: Math.ceil(leadP2.trailLife),
-              p2MaxLife: leadP2.maxLife,
-              p2Power: Math.floor(leadP2.power),
-              p2MaxPower: leadP2.maxPower,
-              p2Combo: team2Combo,
-              p2StateNo: leadP2.stateNo,
+            const nextT1 = team1.map(makeMemberHud);
+            const nextT2 = team2.map(makeMemberHud);
+            const p1Life = Math.ceil(p1.life);
+            const p1Trail = Math.ceil(p1.trailLife);
+            const p1Power = Math.floor(p1.power);
+            const p2Life = Math.ceil(leadP2.life);
+            const p2Trail = Math.ceil(leadP2.trailLife);
+            const p2Power = Math.floor(leadP2.power);
+            setFightHud(prev => {
+              const membersEqual = (a: FightMemberHud[], b: FightMemberHud[]) =>
+                a.length === b.length &&
+                a.every(
+                  (m, idx) =>
+                    m.id === b[idx].id &&
+                    m.life === b[idx].life &&
+                    m.trail === b[idx].trail &&
+                    m.power === b[idx].power &&
+                    m.stateNo === b[idx].stateNo &&
+                    m.comboCount === b[idx].comboCount
+                );
+              if (
+                prev.p1Life === p1Life &&
+                prev.p1Trail === p1Trail &&
+                prev.p1MaxLife === p1.maxLife &&
+                prev.p1Power === p1Power &&
+                prev.p1MaxPower === p1.maxPower &&
+                prev.p1Combo === team1Combo &&
+                prev.p2Life === p2Life &&
+                prev.p2Trail === p2Trail &&
+                prev.p2MaxLife === leadP2.maxLife &&
+                prev.p2Power === p2Power &&
+                prev.p2MaxPower === leadP2.maxPower &&
+                prev.p2Combo === team2Combo &&
+                prev.p2StateNo === leadP2.stateNo &&
+                membersEqual(prev.team1, nextT1) &&
+                membersEqual(prev.team2, nextT2)
+              ) {
+                return prev;
+              }
+              return {
+                team1: nextT1,
+                team2: nextT2,
+                p1Life,
+                p1Trail,
+                p1MaxLife: p1.maxLife,
+                p1Power,
+                p1MaxPower: p1.maxPower,
+                p1Combo: team1Combo,
+                p2Life,
+                p2Trail,
+                p2MaxLife: leadP2.maxLife,
+                p2Power,
+                p2MaxPower: leadP2.maxPower,
+                p2Combo: team2Combo,
+                p2StateNo: leadP2.stateNo,
+              };
             });
           }
         }
@@ -4549,6 +5909,20 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
             drawFighter(ctx, f, cameraXRef.current, canvas.width, scale, pal);
           }
 
+          // Render Helpers, Explods & Projectiles in Fight Mode
+          for (const h of helpersRef.current) {
+            const pal = h.team === 1 ? team1Palettes[h.slotIdx] ?? p1Palette : team2Palettes[h.slotIdx] ?? p2Palette;
+            drawFighter(ctx, h, cameraXRef.current, canvas.width, scale, pal);
+          }
+          for (const ex of explodsRef.current) {
+            const pal = ex.team === 1 ? p1Palette : p2Palette;
+            drawExplod(ctx, ex, cameraXRef.current, canvas.width, scale, pal);
+          }
+          for (const p of projectilesRef.current) {
+            const pal = p.team === 1 ? p1Palette : p2Palette;
+            drawProjectile(ctx, p, cameraXRef.current, canvas.width, scale, pal);
+          }
+
           // Render Hit / Guard Sparks
           for (const sp of sparksRef.current) {
             const sx = canvas.width / 2 + (sp.x - cameraXRef.current) * scale;
@@ -4581,6 +5955,15 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           }
         } else {
           drawFighter(ctx, p1, cameraXRef.current, canvas.width, scale, p1Palette);
+          for (const h of helpersRef.current) {
+            drawFighter(ctx, h, cameraXRef.current, canvas.width, scale, p1Palette);
+          }
+          for (const ex of explodsRef.current) {
+            drawExplod(ctx, ex, cameraXRef.current, canvas.width, scale, p1Palette);
+          }
+          for (const p of projectilesRef.current) {
+            drawProjectile(ctx, p, cameraXRef.current, canvas.width, scale, p1Palette);
+          }
         }
       }
 
@@ -4849,13 +6232,18 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
   const modalCard = (
     <div
-      className={`bg-[#18181c] border border-[#34343d] rounded-2xl shadow-2xl w-full flex flex-col overflow-hidden ${
+      className={`relative bg-[#18181c] border border-[#34343d] rounded-2xl shadow-2xl w-full flex flex-col ${
         isLandscapeShort ? 'max-w-[540px] max-h-full' : 'max-w-5xl max-h-full'
       }`}
-      onClick={e => e.stopPropagation()}
+      onClick={e => {
+        e.stopPropagation();
+        if (showPaletteKeymapMenu && keymapMenuRef.current && !keymapMenuRef.current.contains(e.target as Node)) {
+          setShowPaletteKeymapMenu(false);
+        }
+      }}
     >
       {/* Header */}
-      <div className="px-3 sm:px-4 py-2 bg-[#121216] border-b border-[#2a2a32] flex flex-wrap items-center justify-between gap-2 shrink-0">
+      <div className="relative z-30 px-3 sm:px-4 py-2 bg-[#121216] border-b border-[#2a2a32] rounded-t-2xl flex flex-wrap items-center justify-between gap-2 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           <div className={`w-7 h-7 rounded-lg border flex items-center justify-center shrink-0 ${
             mode === 'fight'
@@ -4962,18 +6350,18 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  const pals = sffData?.palettes || [];
-                  if (pals.length <= 1) return;
+                  if (bodyPalIndices.length <= 1) return;
                   if (differentPaletteIndices.length > 1) {
                     const pos = differentPaletteIndices.indexOf(p2PaletteIdx);
                     setP2PaletteIdx(differentPaletteIndices[(pos + 1) % differentPaletteIndices.length]);
                   } else {
-                    setP2PaletteIdx((p2PaletteIdx + 1) % pals.length);
+                    const pos = bodyPalIndices.indexOf(p2PaletteIdx);
+                    setP2PaletteIdx(bodyPalIndices[(pos + 1) % bodyPalIndices.length]);
                   }
                 }}
-                disabled={(sffData?.palettes?.length ?? 0) <= 1}
+                disabled={bodyPalIndices.length <= 1}
                 className={`px-2 py-1 rounded border text-[10px] font-semibold flex items-center gap-1 transition-colors ${
-                  (sffData?.palettes?.length ?? 0) > 1
+                  bodyPalIndices.length > 1
                     ? 'bg-[#24242b] hover:bg-[#30303a] border-[#3a3a45] text-cyan-300 cursor-pointer'
                     : 'bg-[#1c1c22] border-[#2c2c34] text-zinc-500 cursor-not-allowed'
                 }`}
@@ -4984,9 +6372,101 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
                 }
               >
                 P2 Pal #{p2PaletteIdx + 1}
-                {(sffData?.palettes?.length ?? 0) <= 1 && ' (1 Pal)'}
+                {(() => {
+                  const total = sffData?.palettes?.length ?? 0;
+                  const btns = total > 0 ? getKeymapButtonsForPaletteIndex(p2PaletteIdx, paletteKeymap, total, palSlotIndices, bodyPalIndices) : [];
+                  return btns.length > 0 ? ` [${btns[0].toUpperCase()}]` : '';
+                })()}
+                {bodyPalIndices.length <= 1 && ' (1 Pal)'}
               </button>
             </>
+          )}
+
+          {bodyPalIndices.length > 1 && (
+            <div className="relative" ref={keymapMenuRef}>
+              <button
+                type="button"
+                onClick={() => setShowPaletteKeymapMenu(v => !v)}
+                className={`px-2 py-1 rounded border text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-colors ${
+                  showPaletteKeymapMenu
+                    ? 'bg-purple-600/30 border-purple-500/60 text-purple-200'
+                    : 'bg-[#24242b] hover:bg-[#30303a] border-[#3a3a45] text-purple-300'
+                }`}
+                title="Pick P1 or P2 palette using [Palette Keymap] (X/Y/Z/A/B/C)"
+              >
+                <Palette size={11} />
+                Keymap
+              </button>
+              {showPaletteKeymapMenu && (
+                <div className="absolute right-0 mt-1.5 w-64 bg-[#18181f] border border-[#3a3a48] rounded-xl shadow-2xl p-2.5 z-50 flex flex-col gap-2">
+                  <div className="flex items-center justify-between gap-2 border-b border-[#2b2b36] pb-1.5">
+                    <span className="text-[10px] font-bold uppercase text-purple-300">
+                      Palette Keymap
+                    </span>
+                    {mode === 'fight' && (
+                      <div className="flex bg-[#111116] p-0.5 rounded border border-[#2d2d38] text-[10px]">
+                        <button
+                          type="button"
+                          onClick={() => setPaletteMenuTarget('p1')}
+                          className={`px-1.5 py-0.5 rounded cursor-pointer font-bold ${
+                            paletteMenuTarget === 'p1' ? 'bg-emerald-600 text-white' : 'text-zinc-400'
+                          }`}
+                        >
+                          P1
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPaletteMenuTarget('p2')}
+                          className={`px-1.5 py-0.5 rounded cursor-pointer font-bold ${
+                            paletteMenuTarget === 'p2' ? 'bg-rose-600 text-white' : 'text-zinc-400'
+                          }`}
+                        >
+                          P2
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-3 gap-1">
+                    {PALETTE_KEYMAP_KEYS.map((keyBtn: PaletteKeyName) => {
+                      const pals = sffData?.palettes || [];
+                      const palNum = paletteKeymap[keyBtn] ?? 1;
+                      const resolvedIdx = resolvePaletteSlotIndex(palNum, pals.length, palSlotIndices, bodyPalIndices);
+                      const activeIdx = mode === 'fight' && paletteMenuTarget === 'p2' ? p2PaletteIdx : localP1PaletteIdx;
+                      const isSel = activeIdx === resolvedIdx;
+                      const palData = pals[resolvedIdx]?.data;
+                      return (
+                        <button
+                          key={keyBtn}
+                          type="button"
+                          onClick={() => {
+                            if (mode === 'fight' && paletteMenuTarget === 'p2') {
+                              setP2PaletteIdx(resolvedIdx);
+                            } else {
+                              setLocalP1PaletteIdx(resolvedIdx);
+                              onSelectPaletteIdx?.(resolvedIdx);
+                            }
+                          }}
+                          className={`px-1.5 py-1 rounded border text-[10px] font-mono flex items-center justify-between gap-1 cursor-pointer ${
+                            isSel
+                              ? 'bg-purple-600/35 border-purple-400 text-white font-bold'
+                              : 'bg-[#22222b] border-[#323240] text-zinc-300 hover:bg-[#2c2c38]'
+                          }`}
+                        >
+                          <span className="flex items-center gap-1">
+                            <span
+                              className="w-2 h-2 rounded-full border border-black/50 shrink-0"
+                              style={{ backgroundColor: getPaletteSwatchColor(palData) }}
+                            />
+                            <span className="uppercase">{keyBtn}</span>
+                          </span>
+                          <span className="text-zinc-400">P{palNum}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
           )}
 
           <button
@@ -5066,7 +6546,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
       {/* Button & Keybinding Customizer Drawer */}
       {showCustomize && (
-        <div className="px-4 py-2.5 bg-[#16161d] border-b border-[#2e2e38] flex flex-col gap-2 shrink-0 max-h-44 overflow-y-auto">
+        <div className="relative z-20 px-4 py-2.5 bg-[#16161d] border-b border-[#2e2e38] flex flex-col gap-2 shrink-0 max-h-44 overflow-y-auto">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Keyboard size={13} className="text-amber-400" />
@@ -5194,13 +6674,17 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       )}
 
       {/* Stage + HUD */}
-      <div className="relative bg-black flex items-center justify-center shrink min-h-0">
+      <div className="relative z-10 bg-black flex items-center justify-center shrink min-h-[120px] overflow-hidden">
         <canvas
           ref={canvasRef}
           width={640}
           height={320}
-          className={`w-full aspect-[640/320] object-contain ${
-            isLandscapeShort ? 'max-h-[68vh]' : showExternalPad ? 'max-w-[720px] max-h-[36vh] sm:max-h-[42vh]' : 'max-w-[760px]'
+          className={`pointer-events-none w-full aspect-[640/320] object-contain ${
+            isLandscapeShort
+              ? 'max-h-[68vh]'
+              : showExternalPad
+                ? 'max-w-[720px] max-h-[36vh] sm:max-h-[42vh]'
+                : 'max-w-[760px] max-h-[56vh]'
           }`}
         />
 
@@ -5573,7 +7057,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
 
       {/* Fight Mode Non-overlapping Telemetry & Input Strip */}
       {mode === 'fight' && (
-        <div className="px-3 sm:px-4 py-1 bg-[#0e0e13] border-t border-[#262630] flex flex-wrap items-center justify-between gap-2 font-mono text-[9px] sm:text-[10px] text-zinc-300 shrink-0">
+        <div className="relative z-20 px-3 sm:px-4 py-1 bg-[#0e0e13] border-t border-[#262630] flex flex-wrap items-center justify-between gap-2 font-mono text-[9px] sm:text-[10px] text-zinc-300 shrink-0">
           <div className="flex flex-wrap items-center gap-2">
             <span>P1: <strong className="text-emerald-400">{activeState}</strong></span>
             <span>P2: <strong className="text-cyan-400">{fightHud.p2StateNo}</strong></span>
@@ -5608,7 +7092,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
       )}
 
       {/* Statedefs & CMD Moves Panel (No joystick/arcade buttons inside modal!) */}
-      <div className="bg-[#141418] border-t border-[#282830] flex flex-col min-h-0">
+      <div className="relative z-20 bg-[#141418] border-t border-[#282830] rounded-b-2xl flex flex-col shrink min-h-0 overflow-hidden">
         <div className="px-3 py-1.5 bg-[#17171d] border-b border-[#25252e] flex flex-wrap items-center justify-between gap-2 shrink-0">
           <div className="flex items-center gap-2">
             <div className="flex bg-[#121216] p-0.5 rounded-lg border border-[#2b2b34]">
@@ -5664,7 +7148,7 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
         </div>
 
         {showStatedefDrawer && (
-          <div className="p-2.5 sm:p-3 flex flex-col gap-2 overflow-y-auto max-h-36">
+          <div className="p-2.5 sm:p-3 flex flex-col gap-2 overflow-y-auto max-h-28 sm:max-h-36">
             {rightTab === 'statedefs' && (
               <>
                 <div className="flex flex-wrap gap-1">
@@ -5788,7 +7272,9 @@ export const MoveTesterModal: React.FC<MoveTesterModalProps> = ({
           ? 'flex-row items-end justify-between gap-2 p-2'
           : 'flex-col justify-between p-2 sm:p-3'
       }`}
-      onClick={onClose}
+      onClick={e => {
+        if (e.target === e.currentTarget) onClose();
+      }}
     >
       {isLandscapeShort && showExternalPad ? (
         <>

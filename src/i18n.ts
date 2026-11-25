@@ -44,8 +44,8 @@ i18n
               description: 'Import a .ZIP archive containing SFF, AIR, and ACT files to continue editing.',
             },
             importFolder: {
-              title: 'Import Folder',
-              description: 'Load a local directory containing your character source assets.',
+              title: 'Import Files',
+              description: 'Select individual character files (.def, .sff, .air, .act, .cmd, .cns, .snd) from a folder.',
             },
             documentation: 'Documentation',
             credits: 'Proudly optimized for M.U.G.E.N Standard',

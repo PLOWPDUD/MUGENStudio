@@ -45,9 +45,9 @@ export function parseActBinary(buffer: ArrayBuffer): Uint8Array {
 
   /**
    * Detects when an imported palette is stored upside down (255..0 instead of 0..255),
-   * which causes character sprites (referencing low indices) to hit unused black slots and render completely black.
-   * Compares sprite pixel coverage against original vs reversed palettes and flips only when the reversed
-   * palette cleanly restores real colors on an otherwise near-black render.
+   * which causes character sprites (referencing low indices) to hit unused/filler slots.
+   * Evaluates pixel index histograms across body sprites against original vs reversed palettes,
+   * incorporating reference PCX palette distance and luminance correlation when available.
    */
   export function detectAndFixUpsideDownPalette(
     paletteRGBA: Uint8Array,
@@ -64,55 +64,160 @@ export function parseActBinary(buffer: ArrayBuffer): Uint8Array {
       return { palette: paletteRGBA, wasFlipped: false };
     }
 
-    const sharedBody = validImages.filter(img => img.group < 9000 && img.isSharedPalette !== false);
-    const anyBody = validImages.filter(img => img.group < 9000);
+    const sharedBody = validImages.filter(img => img.group < 7000 && img.isSharedPalette !== false);
+    const anyBody = validImages.filter(img => img.group < 7000);
     const pool = sharedBody.length > 0 ? sharedBody : anyBody.length > 0 ? anyBody : validImages;
-    const sampled = pool.slice(0, 12);
+    const sampled = pool.slice(0, 28);
+
+    const idxCounts = new Uint32Array(256);
+    let totalNonZero = 0;
+    for (const img of sampled) {
+      const px = img.pixelIndices;
+      const step = Math.max(1, Math.floor(px.length / 4096));
+      for (let k = 0; k < px.length; k += step) {
+        const idx = px[k];
+        if (idx === 0) continue;
+        idxCounts[idx]++;
+        totalNonZero++;
+      }
+    }
+
+    if (totalNonZero === 0) {
+      return { palette: paletteRGBA, wasFlipped: false };
+    }
+
+    const refPal =
+      validImages.find(
+        img => img.group < 7000 && !img.isSharedPalette && img.palette && img.palette.length >= 1024
+      )?.palette ||
+      validImages.find(img => img.group < 7000 && img.palette && img.palette.length >= 1024)?.palette;
 
     const evaluate = (pal: Uint8Array) => {
-      let nonZero = 0;
       let lit = 0;
-      const distinct = new Set<number>();
+      const colorCounts = new Map<number, number>();
+      let maxColorFreq = 0;
+      let weightedRgbDist = 0;
+      let exactMatches = 0;
 
-      for (const img of sampled) {
-        const px = img.pixelIndices;
-        const step = Math.max(1, Math.floor(px.length / 4096));
-        for (let k = 0; k < px.length; k += step) {
-          const idx = px[k];
-          if (idx === 0) continue;
-          nonZero++;
-          const off = idx * 4;
-          const r = pal[off] ?? 0;
-          const g = pal[off + 1] ?? 0;
-          const b = pal[off + 2] ?? 0;
-          const a = pal[off + 3] ?? 255;
-          if (a > 0 && (r > 10 || g > 10 || b > 10)) {
-            lit++;
-            distinct.add((r << 16) | (g << 8) | b);
+      // For weighted Pearson luminance correlation against refPal
+      let sumW = 0;
+      let sumL = 0;
+      let sumRefL = 0;
+      let sumLL = 0;
+      let sumRefLL = 0;
+      let sumLRefL = 0;
+
+      for (let idx = 1; idx < 256; idx++) {
+        const count = idxCounts[idx];
+        if (count === 0) continue;
+        const off = idx * 4;
+        const r = pal[off] ?? 0;
+        const g = pal[off + 1] ?? 0;
+        const b = pal[off + 2] ?? 0;
+
+        const rgb = (r << 16) | (g << 8) | b;
+        const nextFreq = (colorCounts.get(rgb) ?? 0) + count;
+        colorCounts.set(rgb, nextFreq);
+        if (nextFreq > maxColorFreq) maxColorFreq = nextFreq;
+        if (r > 10 || g > 10 || b > 10) {
+          lit += count;
+        }
+
+        if (refPal) {
+          const rr = refPal[off] ?? 0;
+          const rg = refPal[off + 1] ?? 0;
+          const rb = refPal[off + 2] ?? 0;
+          const dr = Math.abs(r - rr);
+          const dg = Math.abs(g - rg);
+          const db = Math.abs(b - rb);
+          weightedRgbDist += count * (dr + dg + db);
+          if (dr <= 10 && dg <= 10 && db <= 10) {
+            exactMatches += count;
           }
+
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          const refLum = 0.299 * rr + 0.587 * rg + 0.114 * rb;
+          sumW += count;
+          sumL += count * lum;
+          sumRefL += count * refLum;
+          sumLL += count * lum * lum;
+          sumRefLL += count * refLum * refLum;
+          sumLRefL += count * lum * refLum;
         }
       }
 
+      let lumCorr = 0;
+      if (refPal && sumW > 0) {
+        const meanL = sumL / sumW;
+        const meanRef = sumRefL / sumW;
+        const varL = Math.max(0, sumLL / sumW - meanL * meanL);
+        const varRef = Math.max(0, sumRefLL / sumW - meanRef * meanRef);
+        const denom = Math.sqrt(varL * varRef);
+        if (denom > 1e-4) {
+          lumCorr = (sumLRefL / sumW - meanL * meanRef) / denom;
+        }
+      }
+
+      const bgDist = refPal
+        ? (Math.abs((pal[0] ?? 0) - (refPal[0] ?? 0)) +
+            Math.abs((pal[1] ?? 0) - (refPal[1] ?? 0)) +
+            Math.abs((pal[2] ?? 0) - (refPal[2] ?? 0))) /
+          3
+        : 0;
+
       return {
-        nonZero,
-        litRatio: nonZero > 0 ? lit / nonZero : 0,
-        distinctCount: distinct.size,
+        nonZero: totalNonZero,
+        litRatio: lit / totalNonZero,
+        distinctCount: colorCounts.size,
+        dominantRatio: maxColorFreq / totalNonZero,
+        meanRgbDistToRef: refPal ? weightedRgbDist / (3 * totalNonZero) : 999,
+        exactMatchRatio: refPal ? exactMatches / totalNonZero : 0,
+        lumCorr,
+        bgDist,
       };
     };
 
     const orig = evaluate(paletteRGBA);
-    if (orig.nonZero === 0) {
+    // Safety guard: if the original palette already closely matches the SFF body reference palette, keep it upright
+    if (refPal && orig.meanRgbDistToRef <= 18 && orig.exactMatchRatio >= 0.6) {
       return { palette: paletteRGBA, wasFlipped: false };
     }
 
     const flipped = reversePalette(paletteRGBA);
     const rev = evaluate(flipped);
+    const refStats = refPal ? evaluate(refPal) : null;
+
+    const blackUnusedFlip =
+      orig.litRatio < 0.14 &&
+      rev.litRatio > 0.25 &&
+      rev.litRatio > orig.litRatio * 2.5 &&
+      (rev.distinctCount >= 3 || (orig.litRatio === 0 && rev.litRatio > 0.3 && rev.distinctCount >= 1));
+
+    const fillerUnusedFlip =
+      orig.distinctCount <= 6 &&
+      orig.dominantRatio >= 0.78 &&
+      rev.distinctCount >= Math.max(8, orig.distinctCount * 2.5) &&
+      rev.dominantRatio <= 0.78;
+
+    const refCollapseFlip =
+      Boolean(refStats && refStats.distinctCount >= 8) &&
+      orig.distinctCount <= Math.max(6, Math.floor((refStats?.distinctCount ?? 0) * 0.5)) &&
+      rev.distinctCount >= Math.max(orig.distinctCount * 1.5, Math.floor((refStats?.distinctCount ?? 0) * 0.6)) &&
+      (rev.dominantRatio <= orig.dominantRatio - 0.12 || rev.distinctCount >= orig.distinctCount * 2);
+
+    const refExactMatchFlip =
+      Boolean(refStats) &&
+      rev.meanRgbDistToRef <= 24 &&
+      rev.exactMatchRatio >= 0.55 &&
+      orig.meanRgbDistToRef > Math.max(22, rev.meanRgbDistToRef * 1.6);
+
+    const refLumCorrFlip =
+      Boolean(refStats && refStats.distinctCount >= 8 && rev.distinctCount >= 8) &&
+      ((rev.lumCorr >= 0.32 && orig.lumCorr <= 0.18 && rev.lumCorr - Math.max(0, orig.lumCorr) >= 0.25 && orig.distinctCount <= rev.distinctCount * 1.15) ||
+        (Math.abs(rev.lumCorr) >= 0.38 && Math.abs(orig.lumCorr) <= 0.16 && rev.bgDist <= 18 && orig.bgDist >= 30));
 
     const isUpsideDown =
-      orig.litRatio < 0.08 &&
-      rev.litRatio > 0.25 &&
-      rev.litRatio > orig.litRatio * 3 &&
-      (rev.distinctCount >= 3 || (orig.litRatio === 0 && rev.litRatio > 0.35 && rev.distinctCount >= 1));
+      blackUnusedFlip || fillerUnusedFlip || refCollapseFlip || refExactMatchFlip || refLumCorrFlip;
 
     return isUpsideDown
       ? { palette: flipped, wasFlipped: true }

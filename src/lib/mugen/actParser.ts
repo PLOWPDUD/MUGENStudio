@@ -44,6 +44,25 @@ export function parseActBinary(buffer: ArrayBuffer): Uint8Array {
   }
 
   /**
+   * Encodes a 256-color RGBA (1024-byte) or RGB (768-byte) palette into a standard
+   * 768-byte M.U.G.E.N / IKEMEN GO .act binary file.
+   * M.U.G.E.N, IKEMEN GO, and Fighter Factory read .act tables in reverse index order
+   * (255 down to 0): byte 0..2 = index 255, byte 765..767 = index 0 (transparency).
+   */
+  export function encodeActBinary(paletteData: Uint8Array, mugenReverseOrder = true): Uint8Array {
+    const actBuffer = new Uint8Array(768);
+    const stride = paletteData.length >= 1024 ? 4 : 3;
+    for (let i = 0; i < 256; i++) {
+      const srcIdx = mugenReverseOrder ? 255 - i : i;
+      const srcOff = srcIdx * stride;
+      actBuffer[i * 3] = paletteData[srcOff] ?? 0;
+      actBuffer[i * 3 + 1] = paletteData[srcOff + 1] ?? 0;
+      actBuffer[i * 3 + 2] = paletteData[srcOff + 2] ?? 0;
+    }
+    return actBuffer;
+  }
+
+  /**
    * Detects when an imported palette is stored upside down (255..0 instead of 0..255),
    * which causes character sprites (referencing low indices) to hit unused/filler slots.
    * Evaluates pixel index histograms across body sprites against original vs reversed palettes,

@@ -29,7 +29,7 @@ import { palettesAreSame } from '../lib/mugen/combatEngine';
 import { parseSffBinary, extractPortraits } from '../lib/mugen/sffParser';
 import { generateTemplateSff, buildSffBinary } from '../lib/mugen/sffGenerator';
 import { templateAir, templateCmd, templateCns, templateDef } from '../lib/mugen/templateFiles';
-import { parseActBinary, applyPalette, imageToSpriteIndices, reversePalette, detectAndFixUpsideDownPalette } from '../lib/mugen/actParser';
+import { parseActBinary, encodeActBinary, applyPalette, imageToSpriteIndices, reversePalette, detectAndFixUpsideDownPalette } from '../lib/mugen/actParser';
 import { parseAirString, serializeAirData } from '../lib/mugen/airParser';
 import type { SffData, AirData, AirAction, AirElement } from '../lib/mugen/types';
 import { parseSndBinary, buildSndBinary } from '../lib/mugen/sndParser';
@@ -3255,23 +3255,23 @@ export default function MugenStudio({
   };
 
   const handleSavePalette = () => {
-    const pal = sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette || sffData?.images[selectedSpriteIdx]?.palette;
+    const pal =
+      sffData?.palettes?.[selectedPaletteIdx]?.data ||
+      sffData?.palettes?.[0]?.data ||
+      actPalette ||
+      sffData?.images[selectedSpriteIdx]?.palette;
     if (!pal) {
       alert("No active palette to download!");
       return;
     }
-    const actBuffer = new Uint8Array(768);
-    for (let i = 0; i < 256; i++) {
-      actBuffer[i * 3] = pal[i * 4];
-      actBuffer[i * 3 + 1] = pal[i * 4 + 1];
-      actBuffer[i * 3 + 2] = pal[i * 4 + 2];
-    }
+    const actBuffer = encodeActBinary(pal);
     const blob = new Blob([actBuffer], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = `${getIniField(iniData, 'Info', 'name') || 'character'}.act`;
     a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const playSound = (sound: SndSound) => {
@@ -3468,15 +3468,13 @@ export default function MugenStudio({
 
       // 6. Act Palette (.act - Optional)
       if (exportZipIncludeAct) {
-        const pal = actPalette || sffData?.images[selectedSpriteIdx]?.palette;
+        const pal =
+          sffData?.palettes?.[selectedPaletteIdx]?.data ||
+          sffData?.palettes?.[0]?.data ||
+          actPalette ||
+          sffData?.images[selectedSpriteIdx]?.palette;
         if (pal) {
-          const actBuffer = new Uint8Array(768);
-          for (let i = 0; i < 256; i++) {
-            actBuffer[i * 3] = pal[i * 4];
-            actBuffer[i * 3 + 1] = pal[i * 4 + 1];
-            actBuffer[i * 3 + 2] = pal[i * 4 + 2];
-          }
-          zip.file(`${charNameClean}/${actFile}`, actBuffer);
+          zip.file(`${charNameClean}/${actFile}`, encodeActBinary(pal));
         }
       }
 
@@ -4516,17 +4514,16 @@ export default function MugenStudio({
                                      </div>
 
                                      {/* Export current */}
-                                     {((sffData.palettes && sffData.palettes[selectedPaletteIdx]) || actPalette) && (
+                                     {((sffData.palettes && (sffData.palettes[selectedPaletteIdx] || sffData.palettes[0])) || actPalette || sffData?.images[selectedSpriteIdx]?.palette) && (
                                          <button 
                                             onClick={() => {
-                                                const pal = sffData?.palettes?.[selectedPaletteIdx]?.data || actPalette;
+                                                const pal =
+                                                    sffData?.palettes?.[selectedPaletteIdx]?.data ||
+                                                    sffData?.palettes?.[0]?.data ||
+                                                    actPalette ||
+                                                    sffData?.images[selectedSpriteIdx]?.palette;
                                                 if (!pal) return;
-                                                const actBuffer = new Uint8Array(768);
-                                                for (let i = 0; i < 256; i++) {
-                                                    actBuffer[i * 3] = pal[i * 4];
-                                                    actBuffer[i * 3 + 1] = pal[i * 4 + 1];
-                                                    actBuffer[i * 3 + 2] = pal[i * 4 + 2];
-                                                }
+                                                const actBuffer = encodeActBinary(pal);
                                                 const blob = new Blob([actBuffer], { type: 'application/octet-stream' });
                                                 const url = URL.createObjectURL(blob);
                                                 const a = document.createElement('a');
@@ -4535,6 +4532,7 @@ export default function MugenStudio({
                                                 const fileName = palMeta ? `pal_${palMeta.group}_${palMeta.item}.act` : 'palette_export.act';
                                                 a.download = fileName;
                                                 a.click();
+                                                setTimeout(() => URL.revokeObjectURL(url), 1000);
                                             }}
                                             className="mt-2 w-full py-1.5 bg-[#222] border border-[#333] text-gray-300 rounded text-[9px] hover:bg-[#2a2a2a] flex items-center justify-center gap-2"
                                          >
@@ -6243,12 +6241,7 @@ export default function MugenStudio({
                                                     onClick={() => {
                                                         const pal = effectivePalette;
                                                         if (!pal) return;
-                                                        const actBuffer = new Uint8Array(768);
-                                                        for (let i = 0; i < 256; i++) {
-                                                            actBuffer[i * 3] = pal[i * 4];
-                                                            actBuffer[i * 3 + 1] = pal[i * 4 + 1];
-                                                            actBuffer[i * 3 + 2] = pal[i * 4 + 2];
-                                                        }
+                                                        const actBuffer = encodeActBinary(pal);
                                                         const blob = new Blob([actBuffer], { type: 'application/octet-stream' });
                                                         const url = URL.createObjectURL(blob);
                                                         const a = document.createElement('a');
@@ -6266,6 +6259,7 @@ export default function MugenStudio({
                                                         
                                                         a.download = fileName;
                                                         a.click();
+                                                        setTimeout(() => URL.revokeObjectURL(url), 1000);
                                                     }}
                                                     className="p-1 px-2 bg-[#222] border border-[#333] hover:bg-[#2a2a2a] rounded text-[9px] text-gray-400 flex items-center gap-1 transition-all"
                                                 >

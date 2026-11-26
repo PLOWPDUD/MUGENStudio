@@ -17,6 +17,7 @@ export interface ParsedCommandDef {
 export interface ParsedHitDef {
   attr: 'S' | 'C' | 'A';
   attrMove: 'N' | 'S' | 'H';
+  isThrow?: boolean;
   hitFlag: string;
   guardFlag: string;
   damage: number;
@@ -36,8 +37,17 @@ export interface ParsedHitDef {
   airHittime: number;
   guardHittime: number;
   fall: boolean;
+  p1StateNo?: number;
+  p2StateNo?: number;
+  p1FacingExpr?: string;
+  p2Facing?: 1 | -1;
   hitSound?: { group: number; sample: number };
   guardSound?: { group: number; sample: number };
+}
+
+export interface HoldDirBranch {
+  req: ('F' | 'B' | 'U' | 'D')[];
+  forb: ('F' | 'B' | 'U' | 'D')[];
 }
 
 export interface ParsedChangeStateRule {
@@ -47,11 +57,15 @@ export interface ParsedChangeStateRule {
   requiredAllCommands: string[];
   requiredAllOrSets: string[][][];
   commandOrGroups: string[][];
+  branchHoldDirGroups?: HoldDirBranch[];
   forbiddenCommands: string[];
+  forbiddenStateNos?: number[];
   allowedStateTypes: ('S' | 'C' | 'A')[];
   targetState: number;
   requireCtrl: boolean;
   requiresP2Close?: boolean;
+  requiresP2NotHit?: boolean;
+  p2GroundOnly?: boolean;
   minPowerRequired: number;
   label?: string;
 }
@@ -68,9 +82,18 @@ export type ControllerType =
   | 'hitdef'
   | 'changestate'
   | 'changeanim'
+  | 'changeanim2'
+  | 'selfstate'
   | 'playsnd'
   | 'statetypeset'
   | 'ctrlset'
+  | 'turn'
+  | 'width'
+  | 'targetbind'
+  | 'targetlifeadd'
+  | 'targetstate'
+  | 'targetvelset'
+  | 'targetfacing'
   | 'projectile'
   | 'helper'
   | 'explod'
@@ -96,6 +119,8 @@ export interface ParsedController {
   moveTypeVal?: 'I' | 'A' | 'H';
   physicsVal?: 'S' | 'C' | 'A' | 'N';
   ctrlVal?: number;
+  targetBindTime?: number;
+  targetKill?: number;
 
   // Projectile fields
   projId?: number;
@@ -420,6 +445,32 @@ export function evalMugenNumber(expr: string | undefined, ctx: EvalContext): num
   let s = expr.trim();
   if (!s) return null;
 
+  const ifelseMatch = s.match(/^ifelse\s*\(([\s\S]+)\)$/i);
+  if (ifelseMatch) {
+    const inner = ifelseMatch[1];
+    const args: string[] = [];
+    let depth = 0;
+    let inQuote = false;
+    let last = 0;
+    for (let i = 0; i < inner.length; i++) {
+      const ch = inner[i];
+      if (ch === '"') inQuote = !inQuote;
+      else if (!inQuote) {
+        if (ch === '(') depth++;
+        else if (ch === ')') depth = Math.max(0, depth - 1);
+        else if (ch === ',' && depth === 0) {
+          args.push(inner.slice(last, i).trim());
+          last = i + 1;
+        }
+      }
+    }
+    args.push(inner.slice(last).trim());
+    if (args.length === 3) {
+      const condOk = evalTriggerExpr(args[0], ctx);
+      return evalMugenNumber(condOk ? args[1] : args[2], ctx);
+    }
+  }
+
   s = s.replace(/const\s*\(\s*([^)]+)\s*\)/gi, (_, inner) => String(resolveConstValue(inner, ctx.constants)));
   s = s.replace(/\bvel\s+x\b/gi, String(ctx.velX));
   s = s.replace(/\bvel\s+y\b/gi, String(ctx.velY));
@@ -427,6 +478,8 @@ export function evalMugenNumber(expr: string | undefined, ctx: EvalContext): num
   s = s.replace(/\bpos\s+y\b/gi, String(ctx.posY));
   s = s.replace(/\bpower\b/gi, String(ctx.mode === 'fight' ? ctx.power : ctx.maxPower));
   s = s.replace(/\blife\b/gi, String(ctx.life));
+  s = s.replace(/\balive\b/gi, ctx.life > 0 ? '1' : '0');
+  s = s.replace(/\bfacing\b/gi, String(ctx.facing ?? 1));
   s = s.replace(/\btime\b/gi, String(ctx.stateTime));
   s = s.replace(/\banimelem\b/gi, String(ctx.animElem));
   s = s.replace(/\bfvar\s*\([^)]*\)/gi, '0');
@@ -832,6 +885,8 @@ export function evalSingleClause(rawClause: string, ctx: EvalContext): boolean {
   }
   if (/^movereversed$/i.test(clause)) return false;
   if (/^(?:hitover|hitshakeover)$/i.test(clause)) return true;
+  if (/^canrecover$/i.test(clause)) return ctx.life > 0;
+  if (/^hitfall$/i.test(clause)) return ctx.moveType === 'H' && (ctx.stateType === 'A' || ctx.stateNo === 5050 || ctx.stateNo === 821);
   const randomMatch = clause.match(/^random\s*(=|!=|<|<=|>|>=)\s*(-?\d+)$/i);
   if (randomMatch) {
     return compareOp(Math.floor(Math.random() * 1000), randomMatch[1], parseInt(randomMatch[2], 10));
@@ -972,11 +1027,16 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
     const requiredAllCommands: string[] = [];
     const requiredAllOrSets: string[][][] = [];
     const commandOrGroups: string[][] = [];
+    let branchHoldMap: Record<number, { req: ('F' | 'B' | 'U' | 'D')[]; forb: ('F' | 'B' | 'U' | 'D')[] }> = {};
     const forbiddenCommands: string[] = [];
+    const forbiddenStateNos: number[] = [];
     const allowedStateTypes = new Set<'S' | 'C' | 'A'>();
     const forbiddenStateTypes = new Set<'S' | 'C' | 'A'>();
     let requireCtrl = false;
     let requiresP2Close = false;
+    let requiresP2NotHit = false;
+    let p2AllowedStates = new Set<'S' | 'C' | 'A'>();
+    let p2ForbiddenStates = new Set<'S' | 'C' | 'A'>();
     let triggerAllMinPower = 0;
     let branchMinPowers: number[] = [];
     let sndVal: { group: number; sample: number } | null = null;
@@ -990,10 +1050,12 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
     let ctrlMoveTypeVal: 'I' | 'A' | 'H' | undefined;
     let ctrlPhysicsVal: 'S' | 'C' | 'A' | 'N' | undefined;
     let ctrlVal: number | undefined;
+    let ctrlTargetBindTime: number | undefined;
+    let ctrlTargetKill: number | undefined;
     let triggerAll: string[] = [];
     let triggerGroups: Record<number, string[]> = {};
     let ctrlHasAnimTimeEnd = false;
-    let hitDefScratch: Partial<ParsedHitDef> & { hasGetPower?: boolean; hasGivePower?: boolean } = {};
+    let hitDefScratch: Partial<ParsedHitDef> & { hasGetPower?: boolean; hasGivePower?: boolean; hasGuardFlag?: boolean } = {};
 
     let ctrlProjId: number | undefined;
     let ctrlProjAnim: number | undefined;
@@ -1045,11 +1107,16 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
       requiredAllCommands.length = 0;
       requiredAllOrSets.length = 0;
       commandOrGroups.length = 0;
+      branchHoldMap = {};
       forbiddenCommands.length = 0;
+      forbiddenStateNos.length = 0;
       allowedStateTypes.clear();
       forbiddenStateTypes.clear();
       requireCtrl = false;
       requiresP2Close = false;
+      requiresP2NotHit = false;
+      p2AllowedStates = new Set();
+      p2ForbiddenStates = new Set();
       triggerAllMinPower = 0;
       branchMinPowers = [];
       sndVal = null;
@@ -1063,6 +1130,8 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
       ctrlMoveTypeVal = undefined;
       ctrlPhysicsVal = undefined;
       ctrlVal = undefined;
+      ctrlTargetBindTime = undefined;
+      ctrlTargetKill = undefined;
       triggerAll = [];
       triggerGroups = {};
       ctrlHasAnimTimeEnd = false;
@@ -1181,6 +1250,11 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
             } else if (forbiddenStateTypes.size > 0) {
               resolvedAllowed = (['S', 'C', 'A'] as const).filter(t => !forbiddenStateTypes.has(t));
             }
+            const branchHoldDirGroups = Object.values(branchHoldMap).filter(
+              g => g.req.length > 0 || g.forb.length > 0
+            );
+            const p2GroundOnly =
+              (p2AllowedStates.size > 0 && !p2AllowedStates.has('A')) || p2ForbiddenStates.has('A');
             rules.push({
               commandName: stateCmdRef || requiredAllCommands[0] || commandOrGroups[0]?.[0] || '',
               matchedCommands: matchedCommands.length > 0 ? [...matchedCommands] : [stateCmdRef],
@@ -1188,11 +1262,15 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
               requiredAllCommands: [...requiredAllCommands],
               requiredAllOrSets: [...requiredAllOrSets],
               commandOrGroups: [...commandOrGroups],
+              branchHoldDirGroups: branchHoldDirGroups.length > 0 ? branchHoldDirGroups : undefined,
               forbiddenCommands: [...forbiddenCommands],
+              forbiddenStateNos: forbiddenStateNos.length > 0 ? [...forbiddenStateNos] : undefined,
               allowedStateTypes: resolvedAllowed,
               targetState: stateValNum,
               requireCtrl,
               requiresP2Close,
+              requiresP2NotHit,
+              p2GroundOnly,
               minPowerRequired: Math.max(triggerAllMinPower, minBranchPower),
               label: sectionLabel && !/^\d+$/.test(sectionLabel) ? sectionLabel : undefined,
             });
@@ -1217,29 +1295,35 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
 
           let builtHitDef: ParsedHitDef | undefined;
           if (stateTypeCtrl === 'hitdef' || stateTypeCtrl === 'projectile') {
+            const isThrow = Boolean(
+              hitDefScratch.isThrow ||
+              hitDefScratch.p1StateNo !== undefined ||
+              hitDefScratch.p2StateNo !== undefined
+            );
             const attrMove = hitDefScratch.attrMove || (st.isHyper || ownerState >= 3000 ? 'H' : ownerState >= 1000 ? 'S' : 'N');
-            const dmg = hitDefScratch.damage ?? (attrMove === 'H' ? 140 : attrMove === 'S' ? 85 : 42);
-            const gDmg = hitDefScratch.guardDamage ?? (attrMove === 'N' ? 0 : Math.max(1, Math.round(dmg * 0.12)));
-            const defaultGetHit = attrMove === 'H' ? 0 : Math.max(20, Math.round(dmg * 0.85));
-            const defaultGetGuard = attrMove === 'H' ? 0 : Math.max(10, Math.round(dmg * 0.42));
-            const defaultGiveHit = Math.max(12, Math.round(dmg * 0.35));
-            const defaultGiveGuard = Math.max(6, Math.round(dmg * 0.18));
+            const dmg = hitDefScratch.damage ?? (isThrow ? 0 : attrMove === 'H' ? 140 : attrMove === 'S' ? 85 : 42);
+            const gDmg = hitDefScratch.guardDamage ?? (isThrow || attrMove === 'N' ? 0 : Math.max(1, Math.round(dmg * 0.12)));
+            const defaultGetHit = isThrow ? 0 : attrMove === 'H' ? 0 : Math.max(20, Math.round(dmg * 0.85));
+            const defaultGetGuard = isThrow ? 0 : attrMove === 'H' ? 0 : Math.max(10, Math.round(dmg * 0.42));
+            const defaultGiveHit = isThrow ? 0 : Math.max(12, Math.round(dmg * 0.35));
+            const defaultGiveGuard = isThrow ? 0 : Math.max(6, Math.round(dmg * 0.18));
             const gvy = hitDefScratch.groundVelY ?? 0;
             const avx = hitDefScratch.airVelX ?? -3.2;
             const avy = hitDefScratch.airVelY ?? -4.5;
             builtHitDef = {
               attr: hitDefScratch.attr || (st.stateType === 'A' ? 'A' : st.stateType === 'C' ? 'C' : 'S'),
               attrMove,
+              isThrow,
               hitFlag: hitDefScratch.hitFlag ?? 'MAF',
-              guardFlag: hitDefScratch.guardFlag ?? 'MA',
+              guardFlag: hitDefScratch.hasGuardFlag ? (hitDefScratch.guardFlag ?? '') : (isThrow ? '' : 'MA'),
               damage: dmg,
               guardDamage: gDmg,
               getPowerHit: hitDefScratch.hasGetPower ? (hitDefScratch.getPowerHit ?? 0) : defaultGetHit,
               getPowerGuard: hitDefScratch.hasGetPower ? (hitDefScratch.getPowerGuard ?? 0) : defaultGetGuard,
               givePowerHit: hitDefScratch.hasGivePower ? (hitDefScratch.givePowerHit ?? 0) : defaultGiveHit,
               givePowerGuard: hitDefScratch.hasGivePower ? (hitDefScratch.givePowerGuard ?? 0) : defaultGiveGuard,
-              pauseP1: hitDefScratch.pauseP1 ?? (attrMove === 'H' ? 10 : 8),
-              pauseP2: hitDefScratch.pauseP2 ?? (attrMove === 'H' ? 10 : 8),
+              pauseP1: hitDefScratch.pauseP1 ?? (isThrow ? 0 : attrMove === 'H' ? 10 : 8),
+              pauseP2: hitDefScratch.pauseP2 ?? (isThrow ? 0 : attrMove === 'H' ? 10 : 8),
               groundVelX: hitDefScratch.groundVelX ?? -4.5,
               groundVelY: gvy,
               airVelX: avx,
@@ -1249,6 +1333,10 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
               airHittime: hitDefScratch.airHittime ?? 16,
               guardHittime: hitDefScratch.guardHittime ?? 12,
               fall: hitDefScratch.fall ?? gvy < -0.5,
+              p1StateNo: hitDefScratch.p1StateNo,
+              p2StateNo: hitDefScratch.p2StateNo,
+              p1FacingExpr: hitDefScratch.p1FacingExpr,
+              p2Facing: hitDefScratch.p2Facing,
               hitSound: hitDefScratch.hitSound,
               guardSound: hitDefScratch.guardSound,
             };
@@ -1266,9 +1354,18 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
             'hitdef',
             'changestate',
             'changeanim',
+            'changeanim2',
+            'selfstate',
             'playsnd',
             'statetypeset',
             'ctrlset',
+            'turn',
+            'width',
+            'targetbind',
+            'targetlifeadd',
+            'targetstate',
+            'targetvelset',
+            'targetfacing',
             'projectile',
             'helper',
             'explod',
@@ -1296,6 +1393,8 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
               moveTypeVal: ctrlMoveTypeVal,
               physicsVal: ctrlPhysicsVal,
               ctrlVal,
+              targetBindTime: ctrlTargetBindTime,
+              targetKill: ctrlTargetKill,
               projId: ctrlProjId,
               projAnim: ctrlProjAnim,
               projHitAnim: ctrlProjHitAnim,
@@ -1548,7 +1647,7 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
           } else if (stateTypeCtrl === 'ctrlset' && /^-?\d+$/.test(val)) {
             ctrlVal = parseInt(val, 10);
           }
-        } else if (key === 'ctrl' && (stateTypeCtrl === 'changestate' || stateTypeCtrl === 'ctrlset') && /^-?\d+$/.test(val)) {
+        } else if (key === 'ctrl' && (stateTypeCtrl === 'changestate' || stateTypeCtrl === 'selfstate' || stateTypeCtrl === 'ctrlset') && /^-?\d+$/.test(val)) {
           ctrlVal = parseInt(val, 10);
         } else if (key === 'time' && stateTypeCtrl === 'superpause') {
           const n = parseInt(val, 10);
@@ -1572,6 +1671,20 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
           xExpr = val;
         } else if (key === 'y') {
           yExpr = val;
+        } else if ((key === 'pos' || key === 'offset') && stateTypeCtrl === 'targetbind') {
+          const commaIdx = val.indexOf(',');
+          if (commaIdx !== -1) {
+            xExpr = val.slice(0, commaIdx).trim();
+            yExpr = val.slice(commaIdx + 1).trim();
+          } else {
+            xExpr = val.trim();
+          }
+        } else if (key === 'time' && stateTypeCtrl === 'targetbind') {
+          const n = parseInt(val, 10);
+          if (!Number.isNaN(n)) ctrlTargetBindTime = n;
+        } else if (key === 'kill' && stateTypeCtrl === 'targetlifeadd') {
+          const n = parseInt(val, 10);
+          if (!Number.isNaN(n)) ctrlTargetKill = n;
         } else if (key === 'attr') {
           if (activeStatedefNo !== null && states[activeStatedefNo] && (/\bH[APT]\b/i.test(val) || /,\s*H/i.test(val))) {
             states[activeStatedefNo].isHyper = true;
@@ -1582,11 +1695,25 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
             if (stChar === 'S' || stChar === 'C' || stChar === 'A') hitDefScratch.attr = stChar;
             const mvChar = parts[1]?.charAt(0);
             if (mvChar === 'N' || mvChar === 'S' || mvChar === 'H') hitDefScratch.attrMove = mvChar;
+            if (parts[1]?.includes('T')) hitDefScratch.isThrow = true;
           }
         } else if (stateTypeCtrl === 'hitdef' || stateTypeCtrl === 'projectile') {
           if (key === 'hitflag') hitDefScratch.hitFlag = val.toUpperCase().replace(/[^MAFDLH+-]/g, '');
-          else if (key === 'guardflag') hitDefScratch.guardFlag = val.toUpperCase().replace(/[^MAHL]/g, '');
-          else if (key === 'damage') {
+          else if (key === 'guardflag') {
+            hitDefScratch.hasGuardFlag = true;
+            hitDefScratch.guardFlag = val.toUpperCase().replace(/[^MAHL]/g, '');
+          } else if (key === 'p1stateno') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) hitDefScratch.p1StateNo = n;
+          } else if (key === 'p2stateno') {
+            const n = parseInt(val, 10);
+            if (!Number.isNaN(n)) hitDefScratch.p2StateNo = n;
+          } else if (key === 'p1facing') {
+            hitDefScratch.p1FacingExpr = val;
+          } else if (key === 'p2facing') {
+            const n = parseInt(val, 10);
+            if (n === 1 || n === -1) hitDefScratch.p2Facing = n;
+          } else if (key === 'damage') {
             const [d, gd] = parseNumberPair(val);
             if (d !== undefined) hitDefScratch.damage = Math.max(0, Math.round(d));
             if (gd !== undefined) hitDefScratch.guardDamage = Math.max(0, Math.round(gd));
@@ -1745,14 +1872,16 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
         }
 
         if (key === 'triggerall' || key.startsWith('trigger')) {
+          let branchIdx: number | null = null;
           if (key === 'triggerall') {
             triggerAll.push(val);
           } else {
             const idxMatch = key.match(/^trigger(\d+)$/);
             if (idxMatch) {
-              const gIdx = parseInt(idxMatch[1], 10);
-              if (!triggerGroups[gIdx]) triggerGroups[gIdx] = [];
-              triggerGroups[gIdx].push(val);
+              branchIdx = parseInt(idxMatch[1], 10);
+              if (!triggerGroups[branchIdx]) triggerGroups[branchIdx] = [];
+              triggerGroups[branchIdx].push(val);
+              if (!branchHoldMap[branchIdx]) branchHoldMap[branchIdx] = { req: [], forb: [] };
             }
           }
 
@@ -1767,15 +1896,37 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
             }
           }
 
+          const dirFromHoldCmd = (cname: string): 'F' | 'B' | 'U' | 'D' | null => {
+            const cn = cname.trim().toLowerCase().replace(/_/g, '');
+            if (cn === 'holdfwd') return 'F';
+            if (cn === 'holdback') return 'B';
+            if (cn === 'holdup') return 'U';
+            if (cn === 'holddown') return 'D';
+            return null;
+          };
+
           const neqMatches = Array.from(val.matchAll(/command\s*!=\s*"([^"]+)"/gi));
           for (const m of neqMatches) {
-            forbiddenCommands.push(m[1]);
+            const cname = m[1];
+            const hd = dirFromHoldCmd(cname);
+            if (hd && branchIdx !== null) {
+              if (!branchHoldMap[branchIdx].forb.includes(hd)) branchHoldMap[branchIdx].forb.push(hd);
+            } else {
+              forbiddenCommands.push(cname);
+            }
           }
           const eqMatches = Array.from(val.matchAll(/command\s*=\s*"([^"]+)"/gi));
           for (const m of eqMatches) {
             const cname = m[1];
-            requiredCommands.push(cname);
-            if (!isHoldDirCmd(cname)) {
+            const hd = dirFromHoldCmd(cname);
+            if (hd) {
+              if (branchIdx !== null) {
+                if (!branchHoldMap[branchIdx].req.includes(hd)) branchHoldMap[branchIdx].req.push(hd);
+              } else {
+                requiredCommands.push(cname);
+              }
+            } else {
+              requiredCommands.push(cname);
               if (!matchedCommands.includes(cname)) matchedCommands.push(cname);
               if (!stateCmdRef) stateCmdRef = cname;
             }
@@ -1807,13 +1958,29 @@ export function parseCmdAndStates(cmdFiles: TextFileLike[], stFiles: TextFileLik
           }
           if (/\bctrl\b/i.test(val)) requireCtrl = true;
           if (/\bp2bodydist\b|\bp2dist\b/i.test(val)) requiresP2Close = true;
+          if (/\bp2movetype\s*!=\s*H\b/i.test(val)) requiresP2NotHit = true;
+          if (/\bp2statetype\s*=\s*S\b/i.test(val)) p2AllowedStates.add('S');
+          if (/\bp2statetype\s*=\s*C\b/i.test(val)) p2AllowedStates.add('C');
+          if (/\bp2statetype\s*=\s*A\b/i.test(val)) p2AllowedStates.add('A');
+          if (/\bp2statetype\s*!=\s*A\b/i.test(val)) p2ForbiddenStates.add('A');
 
-          if (/statetype\s*=\s*S\b/i.test(val)) allowedStateTypes.add('S');
-          if (/statetype\s*=\s*C\b/i.test(val)) allowedStateTypes.add('C');
-          if (/statetype\s*=\s*A\b/i.test(val)) allowedStateTypes.add('A');
-          if (/statetype\s*!=\s*A\b/i.test(val)) forbiddenStateTypes.add('A');
-          if (/statetype\s*!=\s*C\b/i.test(val)) forbiddenStateTypes.add('C');
-          if (/statetype\s*!=\s*S\b/i.test(val)) forbiddenStateTypes.add('S');
+          const snoNeq = Array.from(val.matchAll(/\bstateno\s*!=\s*(\d+)/gi));
+          for (const sm of snoNeq) {
+            const n = parseInt(sm[1], 10);
+            if (!Number.isNaN(n) && key === 'triggerall' && !forbiddenStateNos.includes(n)) {
+              forbiddenStateNos.push(n);
+            }
+          }
+
+          if (/statetype\s*=\s*S\b/i.test(val) && !/p2statetype/i.test(val)) allowedStateTypes.add('S');
+          if (/statetype\s*=\s*C\b/i.test(val) && !/p2statetype/i.test(val)) allowedStateTypes.add('C');
+          if (/statetype\s*=\s*A\b/i.test(val) && !/p2statetype/i.test(val)) allowedStateTypes.add('A');
+          if (/(?:^|[^2])statetype\s*=\s*S\b/i.test(val)) allowedStateTypes.add('S');
+          if (/(?:^|[^2])statetype\s*=\s*C\b/i.test(val)) allowedStateTypes.add('C');
+          if (/(?:^|[^2])statetype\s*=\s*A\b/i.test(val)) allowedStateTypes.add('A');
+          if (/(?:^|[^2])statetype\s*!=\s*A\b/i.test(val)) forbiddenStateTypes.add('A');
+          if (/(?:^|[^2])statetype\s*!=\s*C\b/i.test(val)) forbiddenStateTypes.add('C');
+          if (/(?:^|[^2])statetype\s*!=\s*S\b/i.test(val)) forbiddenStateTypes.add('S');
           if (/animtime\s*=\s*0|!\s*animtime\b/i.test(val)) {
             ctrlHasAnimTimeEnd = true;
           }
@@ -2035,6 +2202,7 @@ export interface FighterRuntime {
   ctrl: number;
   life: number;
   trailLife: number;
+  trailHoldTicks?: number;
   maxLife: number;
   power: number;
   maxPower: number;
@@ -2068,6 +2236,14 @@ export interface FighterRuntime {
   isHelper?: boolean;
   helperId?: number;
   ownerId?: string;
+  grabTargetId?: string;
+  grabbedById?: string;
+  customStateOwnerId?: string;
+  customAnimOwnerId?: string;
+  targetBindTicks?: number;
+  builtinThrowTicks?: number;
+  builtinThrowDir?: 1 | -1;
+  throwFwdHeld?: boolean;
   hasPlayedDeathSound: boolean;
 }
 
@@ -2109,6 +2285,7 @@ export function createFighterRuntime(
     ctrl: 1,
     life: constants.life,
     trailLife: constants.life,
+    trailHoldTicks: 0,
     maxLife: constants.life,
     power: mode === 'fight' ? 0 : constants.power,
     maxPower: constants.power,

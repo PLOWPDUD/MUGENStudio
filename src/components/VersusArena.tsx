@@ -487,6 +487,35 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
     return ch?.palettes[0] || null;
   };
 
+  const findFighterById = (id?: string): FighterRuntime | undefined => {
+    if (!id) return undefined;
+    return (
+      team1Ref.current.find(x => x.id === id) ||
+      team2Ref.current.find(x => x.id === id) ||
+      helpersRef.current.find(x => x.id === id)
+    );
+  };
+
+  const getStateOwnerChar = (f: FighterRuntime): RosterCharacter | undefined => {
+    if (f.customStateOwnerId) {
+      const owner =
+        team1Ref.current.find(x => x.id === f.customStateOwnerId) ||
+        team2Ref.current.find(x => x.id === f.customStateOwnerId);
+      if (owner) return getCharForFighter(owner);
+    }
+    return getCharForFighter(f);
+  };
+
+  const getAnimChar = (f: FighterRuntime): RosterCharacter | undefined => {
+    if (f.customAnimOwnerId) {
+      const owner =
+        team1Ref.current.find(x => x.id === f.customAnimOwnerId) ||
+        team2Ref.current.find(x => x.id === f.customAnimOwnerId);
+      if (owner) return getCharForFighter(owner);
+    }
+    return getCharForFighter(f);
+  };
+
   const playSoundForCharacter = (charProfileId: string | undefined, group: number, sample: number): boolean => {
     const ch = charProfileId ? rosterMapRef.current.get(charProfileId) : undefined;
     const sndData = ch?.sndData;
@@ -612,22 +641,50 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
     targetState: number,
     options?: { label?: string; asHitOrGuard?: boolean }
   ) => {
-    const ch = getCharForFighter(f);
-    const states = ch?.parsed.states || {};
-    const constants = ch?.parsed.constants || DEFAULT_CONSTANTS;
+    const stateOwnerCh = getStateOwnerChar(f);
+    const states = stateOwnerCh?.parsed.states || {};
+    const constants = stateOwnerCh?.parsed.constants || DEFAULT_CONSTANTS;
+    if ((targetState === 5200 || targetState === 5210) && !states[targetState] && !stateOwnerCh?.airData.actions[targetState]) {
+      f.invulnTicks = 12;
+      f.comboCount = 0;
+      f.velX = -2.2;
+      f.velY = -4.2;
+      transitionFighterState(f, 50, options);
+      return;
+    }
     const stateDef = states[targetState];
-    const nextAnim = resolveAnimForCharacter(ch, targetState, stateDef);
     const prevWasHyper = Boolean(states[f.stateNo]?.isHyper);
 
     f.prevStateNo = f.stateNo;
     f.stateNo = targetState;
-    f.animId = nextAnim;
     f.frameIdx = 0;
     f.tickInFrame = 0;
     f.stateTime = 0;
     f.firedPersist = new Set();
     f.cmdBuffer = {};
     f.landingVelY = 0;
+    f.builtinThrowTicks = 0;
+    f.builtinThrowDir = undefined;
+    if (targetState === 0 || options?.asHitOrGuard || targetState >= 5000) {
+      f.throwFwdHeld = undefined;
+      if (f.grabTargetId) {
+        const tgt = findFighterById(f.grabTargetId);
+        if (tgt && tgt.grabbedById === f.id) {
+          tgt.grabbedById = undefined;
+          tgt.targetBindTicks = 0;
+        }
+        f.grabTargetId = undefined;
+      }
+      if (targetState === 0) {
+        f.grabbedById = undefined;
+        f.customStateOwnerId = undefined;
+        f.customAnimOwnerId = undefined;
+        f.targetBindTicks = 0;
+      }
+    }
+    const animCh = getAnimChar(f);
+    const nextAnim = resolveAnimForCharacter(animCh, targetState, stateDef);
+    f.animId = nextAnim;
     const preserveHitDef = !options?.asHitOrGuard && Boolean(stateDef?.hitDefPersist);
     const preserveMoveHit = !options?.asHitOrGuard && Boolean(stateDef?.hitDefPersist || stateDef?.moveHitPersist);
     if (!preserveHitDef) {
@@ -769,7 +826,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
       name: ch?.name || `Fighter ${f.slotIdx + 1}`,
       portraitUrl,
       life: Math.ceil(f.life),
-      trail: Math.ceil(f.trailLife),
+      trail: Math.round(f.trailLife * 100) / 100,
       maxLife: f.maxLife,
       power: Math.floor(f.power),
       maxPower: f.maxPower,
@@ -937,6 +994,53 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
     }
   };
 
+  const startBuiltinThrow = (atk: FighterRuntime, def: FighterRuntime, dir: 1 | -1) => {
+    const atkCh = getCharForFighter(atk);
+    const airData = atkCh?.airData;
+    if (dir === -1) {
+      atk.facing = atk.facing === 1 ? -1 : 1;
+    }
+    const throwAnim = airData?.actions[810]
+      ? 810
+      : airData?.actions[800]
+        ? 800
+        : airData?.actions[210]
+          ? 210
+          : airData?.actions[200]
+            ? 200
+            : atk.animId;
+    atk.prevStateNo = atk.stateNo;
+    atk.stateNo = 810;
+    atk.animId = throwAnim;
+    atk.frameIdx = 0;
+    atk.tickInFrame = 0;
+    atk.stateTime = 0;
+    atk.stateType = 'S';
+    atk.moveType = 'A';
+    atk.physics = 'N';
+    atk.ctrl = 0;
+    atk.velX = 0;
+    atk.velY = 0;
+    atk.activeHitDef = null;
+    atk.firedPersist = new Set();
+    atk.builtinThrowTicks = 22;
+    atk.builtinThrowDir = dir;
+    atk.grabTargetId = def.id;
+
+    transitionFighterState(def, 5000, { asHitOrGuard: true });
+    def.grabbedById = atk.id;
+    def.targetBindTicks = 30;
+    def.velX = 0;
+    def.velY = 0;
+    def.facing = atk.facing === 1 ? -1 : 1;
+    def.posX = atk.posX + 34 * atk.facing;
+    def.posY = 270;
+
+    if (atk.id === 'p1') {
+      setMatchedMove(dir === -1 ? 'Back Throw' : 'Throw');
+    }
+  };
+
   const triggerP1StateTransition = (targetState: number, label?: string) => {
     const p1 = p1Ref.current;
     if (!p1 || fightOutcomeRef.current || p1.life <= 0 || p1.moveType === 'H') return;
@@ -998,9 +1102,29 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
     f: FighterRuntime,
     ignorePower = false
   ): { matches: boolean; multiWeight: number } => {
+    if (rule.forbiddenStateNos?.includes(f.stateNo)) {
+      return { matches: false, multiWeight: 0 };
+    }
+
     if (rule.requiresP2Close) {
       const opp = getNearestLivingOpponent(f, f.team === 1 ? team2Ref.current : team1Ref.current);
-      if (!opp || Math.abs(f.posX - opp.posX) > 65) return { matches: false, multiWeight: 0 };
+      if (
+        !opp ||
+        opp.life <= 0 ||
+        opp.grabbedById ||
+        opp.stateNo === 5110 ||
+        opp.stateNo === 5120 ||
+        opp.stateNo === 5150 ||
+        Math.abs(f.posX - opp.posX) > 68
+      ) {
+        return { matches: false, multiWeight: 0 };
+      }
+      if (rule.requiresP2NotHit && opp.moveType === 'H') {
+        return { matches: false, multiWeight: 0 };
+      }
+      if (rule.p2GroundOnly && opp.posY < 270) {
+        return { matches: false, multiWeight: 0 };
+      }
     }
 
     if (!ignorePower && rule.minPowerRequired > 0 && f.power < rule.minPowerRequired) {
@@ -1028,6 +1152,12 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
     }
 
     const charDirs = getCharHeldDirs(f);
+    if (rule.branchHoldDirGroups && rule.branchHoldDirGroups.length > 0) {
+      const dirBranchOk = rule.branchHoldDirGroups.some(
+        bg => bg.req.every(d => charDirs.has(d)) && bg.forb.every(d => !charDirs.has(d))
+      );
+      if (!dirBranchOk) return { matches: false, multiWeight: 0 };
+    }
     for (const req of rule.requiredCommands) {
       const rn = req.toLowerCase().replace(/_/g, '');
       if (rn === 'holddown' && !charDirs.has('D')) return { matches: false, multiWeight: 0 };
@@ -1094,7 +1224,12 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
       else if (rawToken === 'UB') token = 'UF';
     }
 
-    const p1LockedOut = fightOutcomeRef.current !== null || p1.life <= 0 || p1.moveType === 'H';
+    const p1LockedOut =
+      fightOutcomeRef.current !== null ||
+      p1.life <= 0 ||
+      p1.moveType === 'H' ||
+      Boolean(p1.grabbedById) ||
+      Boolean(p1.customStateOwnerId);
 
     if (!p1LockedOut && (token === 'B' || token === 'F')) {
       const prev = lastDirTapRef.current;
@@ -1451,7 +1586,9 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
           ? 500
           : 0;
       const hyperBonus = isTargetHyper ? 500 : 0;
+      const throwBonus = rule.requiresP2Close ? 25000 : 0;
       const score =
+        throwBonus +
         effectiveChord * 10000 +
         bestTokenCount * 200 +
         bestChordWeight * 20 +
@@ -1475,6 +1612,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
       } else if (bestCandidate.isMulti) {
         lastChordUpgradeRef.current = null;
       }
+      p1.throwFwdHeld = charHeldDirs.has('F');
       triggerP1StateTransition(bestCandidate.rule.targetState, bestCandidate.label);
       return;
     }
@@ -1512,6 +1650,33 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
 
     if (canAttack && (p1.ctrl === 1 || isNeutralGrounded)) {
       const stance = stanceForCheck;
+      if (
+        stance === 'S' &&
+        p1.stateNo !== 100 &&
+        (charHeldDirs.has('F') || charHeldDirs.has('B')) &&
+        (activeBtnSet.has('y') || activeBtnSet.has('z'))
+      ) {
+        const opp = getNearestLivingOpponent(p1, team2Ref.current);
+        const canGrabOpp =
+          Boolean(opp) &&
+          opp.life > 0 &&
+          !opp.grabbedById &&
+          opp.moveType !== 'H' &&
+          opp.posY >= 270 &&
+          opp.stateNo !== 5110 &&
+          opp.stateNo !== 5120 &&
+          opp.stateNo !== 5150 &&
+          Math.abs(p1.posX - opp.posX) <= 68;
+        if (canGrabOpp) {
+          p1.throwFwdHeld = charHeldDirs.has('F');
+          if (states[800]) {
+            triggerP1StateTransition(800, 'Throw');
+          } else {
+            startBuiltinThrow(p1, opp, charHeldDirs.has('B') ? -1 : 1);
+          }
+          return;
+        }
+      }
       if (activeBtnSet.has('s') && stance !== 'A' && (states[195] || airData?.actions[195])) {
         triggerP1StateTransition(195, 'Taunt');
         return;
@@ -1979,14 +2144,14 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
     let hudFrameCounter = 0;
 
     const runControllersForFighter = (f: FighterRuntime, opp: FighterRuntime) => {
-      const ch = getCharForFighter(f);
-      if (!ch) return;
-      const states = ch.parsed.states;
-      const constants = ch.parsed.constants;
-      const airData = ch.airData;
-
+      const ownCh = getCharForFighter(f);
       let transitionsThisTick = 0;
       while (transitionsThisTick < 4) {
+        const ch = getStateOwnerChar(f);
+        if (!ch) break;
+        const states = ch.parsed.states;
+        const constants = ch.parsed.constants;
+        const airData = getAnimChar(f)?.airData || ch.airData;
         const stDef = states[f.stateNo];
         if (!stDef || stDef.controllers.length === 0) break;
 
@@ -2147,12 +2312,119 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
               f.firedPersist.add(sndKey);
               playSoundForCharacter(f.charProfileId, ctrl.sndValue.group, ctrl.sndValue.sample);
             }
-          } else if (ctrl.type === 'changeanim') {
+          } else if (ctrl.type === 'changeanim' || ctrl.type === 'changeanim2') {
             const nextA = evalMugenNumber(ctrl.valueExpr, ctx);
-            if (nextA !== null && nextA !== f.animId && airData.actions[nextA]) {
+            if (ctrl.type === 'changeanim2') {
+              f.customAnimOwnerId = f.customStateOwnerId || f.grabbedById;
+            } else {
+              f.customAnimOwnerId = undefined;
+            }
+            const targetAir = ctrl.type === 'changeanim2' ? getAnimChar(f)?.airData : ownCh?.airData;
+            if (nextA !== null && targetAir?.actions[nextA] && (nextA !== f.animId || ctrl.type === 'changeanim2')) {
               f.animId = nextA;
               f.frameIdx = 0;
               f.tickInFrame = 0;
+            }
+          } else if (ctrl.type === 'turn') {
+            f.facing = f.facing === 1 ? -1 : 1;
+          } else if (ctrl.type === 'width') {
+            // Accepted for throw spacing compatibility; positioning handled by TargetBind & pushbox skips
+          } else if (ctrl.type === 'targetbind') {
+            const target = findFighterById(f.grabTargetId) || (opp.grabbedById === f.id ? opp : undefined);
+            if (target) {
+              const bx = evalMugenNumber(ctrl.xExpr, ctx) ?? 0;
+              const by = evalMugenNumber(ctrl.yExpr, ctx) ?? 0;
+              target.posX = Math.max(-1400, Math.min(1400, f.posX + bx * f.facing));
+              target.posY = Math.min(270, f.posY + by);
+              target.velX = 0;
+              target.velY = 0;
+              target.grabbedById = f.id;
+              target.targetBindTicks = ctrl.targetBindTime !== undefined && ctrl.targetBindTime > 0 ? ctrl.targetBindTime : 4;
+            }
+          } else if (ctrl.type === 'targetlifeadd') {
+            const target = findFighterById(f.grabTargetId) || (opp.grabbedById === f.id ? opp : undefined);
+            if (target) {
+              const tdKey = `tlife-${ctrl.id}-e${ctx.animElem}-t${f.stateTime}`;
+              const hasElemOrTime = (Object.values(ctrl.triggerGroups) as string[][]).flat().some(t => /animelem|time/i.test(t));
+              const dedupKey = hasElemOrTime ? tdKey : `tlife-${ctrl.id}`;
+              if (!f.firedPersist.has(dedupKey)) {
+                f.firedPersist.add(dedupKey);
+                const val = evalMugenNumber(ctrl.valueExpr, ctx);
+                if (val !== null) {
+                  const scaled =
+                    val < 0
+                      ? -Math.max(1, Math.round(Math.abs(val) * (f.attackMul / Math.max(0.1, target.defenceMul))))
+                      : Math.round(val);
+                  const minLife = ctrl.targetKill === 0 ? 1 : 0;
+                  target.life = Math.max(minLife, Math.min(target.maxLife, target.life + scaled));
+                  if (scaled < 0) {
+                    target.trailHoldTicks = 20;
+                    target.comboCount = target.moveType === 'H' ? Math.max(1, target.comboCount + 1) : 1;
+                    playSynthImpact('hit');
+                    if (target.life <= 0 && !target.hasPlayedDeathSound) {
+                      target.hasPlayedDeathSound = true;
+                      const playedDeath = playSoundForCharacter(target.charProfileId, 11, 0);
+                      if (!playedDeath) playSynthImpact('ko');
+                    }
+                  }
+                }
+              }
+            }
+          } else if (ctrl.type === 'targetstate') {
+            const target = findFighterById(f.grabTargetId) || (opp.grabbedById === f.id ? opp : undefined);
+            if (target) {
+              const nextTS = evalMugenNumber(ctrl.valueExpr, ctx);
+              if (nextTS !== null) {
+                target.grabbedById = undefined;
+                target.targetBindTicks = 0;
+                target.customAnimOwnerId = undefined;
+                target.customStateOwnerId = f.id;
+                f.grabTargetId = undefined;
+                transitionFighterState(target, nextTS);
+                runControllersForFighter(target, f);
+              }
+            }
+          } else if (ctrl.type === 'targetvelset') {
+            const target = findFighterById(f.grabTargetId) || (opp.grabbedById === f.id ? opp : undefined);
+            if (target) {
+              const vx = evalMugenNumber(ctrl.xExpr, ctx);
+              const vy = evalMugenNumber(ctrl.yExpr, ctx);
+              if (vx !== null) target.velX = vx;
+              if (vy !== null) target.velY = vy;
+            }
+          } else if (ctrl.type === 'targetfacing') {
+            const target = findFighterById(f.grabTargetId) || (opp.grabbedById === f.id ? opp : undefined);
+            if (target) {
+              const tf = evalMugenNumber(ctrl.valueExpr, ctx);
+              if (tf !== null) {
+                target.facing = tf >= 0 ? (f.facing === 1 ? -1 : 1) : f.facing;
+              }
+            }
+          } else if (ctrl.type === 'selfstate') {
+            const nextS = evalMugenNumber(ctrl.valueExpr, ctx);
+            if (nextS !== null) {
+              if (f.grabbedById) {
+                const owner = findFighterById(f.grabbedById);
+                if (owner && owner.grabTargetId === f.id) owner.grabTargetId = undefined;
+              }
+              f.customStateOwnerId = undefined;
+              f.customAnimOwnerId = undefined;
+              f.grabbedById = undefined;
+              f.targetBindTicks = 0;
+              if (nextS === 5100) {
+                f.posY = 270;
+                f.velX = 0;
+                f.velY = 0;
+                f.lieDownPhase = 'bounce';
+                f.lieDownTimer = 6;
+                transitionFighterState(f, 5100, { asHitOrGuard: true });
+              } else {
+                transitionFighterState(f, nextS);
+                if (ctrl.ctrlVal !== undefined) f.ctrl = ctrl.ctrlVal;
+              }
+              transitionsThisTick++;
+              transitioned = true;
+              break;
             }
           } else if (ctrl.type === 'changestate') {
             const nextS = evalMugenNumber(ctrl.valueExpr, ctx);
@@ -2358,6 +2630,11 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
       const diff = aiDifficultyRef.current;
       ai.heldDirs.clear();
       ai.aiHoldDown = false;
+      if (ai.stateNo === 800 && ai.stateTime < 6 && ai.throwFwdHeld !== undefined) {
+        const fwdScreen = ai.facing === 1 ? 'F' : 'B';
+        const backScreen = ai.facing === 1 ? 'B' : 'F';
+        ai.heldDirs.add(ai.throwFwdHeld ? fwdScreen : backScreen);
+      }
       if (fightOutcomeRef.current || ai.life <= 0) return;
 
       if (ai.posY >= 270 && ai.ctrl === 1) {
@@ -2429,6 +2706,31 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
           return;
         }
 
+        const oppThrowable =
+          opp.life > 0 &&
+          !opp.grabbedById &&
+          opp.moveType !== 'H' &&
+          opp.posY >= 270 &&
+          opp.stateNo !== 5110 &&
+          opp.stateNo !== 5120 &&
+          opp.stateNo !== 5150;
+        const throwChance = diff === 'hard' ? 0.22 : 0.12;
+        if (dist < 64 && oppThrowable && roll < throwChance) {
+          const throwFwd = Math.random() < 0.5;
+          const fwdScreen = ai.facing === 1 ? 'F' : 'B';
+          const backScreen = ai.facing === 1 ? 'B' : 'F';
+          ai.throwFwdHeld = throwFwd;
+          ai.heldDirs.add(throwFwd ? fwdScreen : backScreen);
+          if (states[800]) {
+            transitionFighterState(ai, 800);
+          } else {
+            startBuiltinThrow(ai, opp, throwFwd ? 1 : -1);
+          }
+          ai.aiCooldown = diff === 'hard' ? 28 : 44;
+          ai.aiWalkDir = 0;
+          return;
+        }
+
         if (dist < 82) {
           if (normals.length > 0 && roll < 0.65) {
             const pick = normals[Math.floor(Math.random() * normals.length)];
@@ -2485,14 +2787,98 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
         }
       }
       if (f.trailLife > f.life) {
-        f.trailLife = Math.max(f.life, f.trailLife - Math.max(2, (f.trailLife - f.life) * 0.12));
+        if ((f.trailHoldTicks ?? 0) > 0) {
+          f.trailHoldTicks = (f.trailHoldTicks ?? 0) - 1;
+        } else {
+          const diff = f.trailLife - f.life;
+          const step = Math.max(0.65, diff * 0.055);
+          f.trailLife = Math.max(f.life, f.trailLife - step);
+        }
+      } else if (f.trailLife < f.life) {
+        f.trailLife = f.life;
+        f.trailHoldTicks = 0;
       }
       if (f.hitPauseTicks > 0) return;
 
-      const ch = getCharForFighter(f);
+      // Built-in F+Y / B+Y grab-and-throw sequence for characters without .cns throw states
+      if ((f.builtinThrowTicks ?? 0) > 0) {
+        f.builtinThrowTicks = (f.builtinThrowTicks ?? 1) - 1;
+        const tLeft = f.builtinThrowTicks;
+        const tgt = findFighterById(f.grabTargetId);
+        if (tgt && tgt.life > 0 && tgt.grabbedById === f.id) {
+          if (tLeft >= 14) {
+            tgt.posX = Math.max(-1400, Math.min(1400, f.posX + 32 * f.facing));
+            tgt.posY = 270 - (22 - tLeft) * 6;
+            tgt.targetBindTicks = 4;
+          } else if (tLeft >= 8) {
+            tgt.posX = Math.max(-1400, Math.min(1400, f.posX + (32 - (14 - tLeft) * 6) * f.facing));
+            tgt.posY = 270 - 54;
+            tgt.targetBindTicks = 4;
+          } else if (tLeft === 7) {
+            const dmg = Math.max(1, Math.round(80 * (f.attackMul / Math.max(0.1, tgt.defenceMul))));
+            tgt.life = Math.max(0, tgt.life - dmg);
+            tgt.trailHoldTicks = 20;
+            f.power = Math.min(f.maxPower, f.power + 65);
+            tgt.power = Math.min(tgt.maxPower, tgt.power + 30);
+            tgt.comboCount = 1;
+            sparksRef.current.push({
+              x: tgt.posX,
+              y: tgt.posY - 270 - 40,
+              age: 0,
+              maxAge: 14,
+              guarded: false,
+              isHyper: false,
+            });
+            const played = playSoundForCharacter(f.charProfileId, 5, 2);
+            if (!played && tgt.life > 0) playSynthImpact('hit');
+            if (tgt.life <= 0 && !tgt.hasPlayedDeathSound) {
+              tgt.hasPlayedDeathSound = true;
+              const playedDeath = playSoundForCharacter(tgt.charProfileId, 11, 0);
+              if (!playedDeath) playSynthImpact('ko');
+            }
+            tgt.grabbedById = undefined;
+            tgt.targetBindTicks = 0;
+            f.grabTargetId = undefined;
+            transitionFighterState(tgt, 5050, { asHitOrGuard: true });
+            tgt.velX = -3.8;
+            tgt.velY = -6.2;
+            tgt.hitStunTicks = 20;
+          }
+        }
+        if (tLeft <= 0) {
+          f.builtinThrowTicks = 0;
+          f.builtinThrowDir = undefined;
+          transitionFighterState(f, 0);
+        }
+        return;
+      }
+
+      // Hold victim securely while bound during a throw; auto-release if thrower is interrupted
+      if (f.grabbedById) {
+        const owner = findFighterById(f.grabbedById);
+        if (!owner || owner.life <= 0 || owner.moveType === 'H' || owner.ctrl === 1 || owner.stateNo === 0 || owner.grabTargetId !== f.id) {
+          f.grabbedById = undefined;
+          f.customStateOwnerId = undefined;
+          f.customAnimOwnerId = undefined;
+          f.targetBindTicks = 0;
+          transitionFighterState(f, 5050, { asHitOrGuard: true });
+          f.velX = -2.5;
+          f.velY = -4.5;
+          f.hitStunTicks = 18;
+          return;
+        }
+        if ((f.targetBindTicks ?? 0) > 0) {
+          f.targetBindTicks = (f.targetBindTicks ?? 1) - 1;
+        }
+        if ((owner.builtinThrowTicks ?? 0) > 0) {
+          return;
+        }
+      }
+
+      const ch = getStateOwnerChar(f);
       const constants = ch?.parsed.constants || DEFAULT_CONSTANTS;
       const states = ch?.parsed.states || {};
-      const airData = ch?.airData;
+      const airData = getAnimChar(f)?.airData;
 
       if (
         f.posY >= 270 &&
@@ -2671,7 +3057,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
         }
       }
 
-      if (f.posY < 270 || f.velY < 0) {
+      if (!(f.grabbedById && (f.targetBindTicks ?? 0) > 0) && (f.posY < 270 || f.velY < 0)) {
         f.posY += f.velY;
         const hasGravityCtrl = Boolean(states[f.stateNo]?.controllers.some(c => c.type === 'gravity'));
         const shouldApplyGravity =
@@ -2709,10 +3095,10 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
       }
       if (f.stateNo === 5150) return;
 
-      const ch = getCharForFighter(f);
+      const ch = getStateOwnerChar(f);
       const states = ch?.parsed.states || {};
       const constants = ch?.parsed.constants || DEFAULT_CONSTANTS;
-      const airData = ch?.airData;
+      const airData = getAnimChar(f)?.airData;
       const downNow = f.heldDirs.has('D') || f.crouchLocked || f.aiHoldDown;
 
       if (f.pendingLanding) {
@@ -2739,6 +3125,26 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
           return;
         }
         if (f.posY >= 270 && f.velY >= 0) f.velY = 0;
+        if ((f.customStateOwnerId || f.moveType === 'H') && f.posY >= 270 && !f.grabbedById) {
+          f.customStateOwnerId = undefined;
+          f.customAnimOwnerId = undefined;
+          f.velX = 0;
+          f.velY = 0;
+          if (f.life <= 0) {
+            f.lieDownPhase = 'ko';
+            if (!f.hasPlayedDeathSound) {
+              f.hasPlayedDeathSound = true;
+              const playedDeath = playSoundForCharacter(f.charProfileId, 11, 0);
+              if (!playedDeath) playSynthImpact('ko');
+            }
+            transitionFighterState(f, 5150, { asHitOrGuard: true });
+          } else {
+            f.lieDownPhase = 'bounce';
+            f.lieDownTimer = 6;
+            transitionFighterState(f, 5100, { asHitOrGuard: true });
+          }
+          return;
+        }
         if (f.stateType === 'A' && f.posY >= 270) {
           f.velX = 0;
           f.velY = 0;
@@ -2865,15 +3271,37 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
                   facing: f.facing,
                 };
                 for (const ctrl of stDef.controllers) {
-                  if (ctrl.type !== 'changestate') continue;
+                  if (ctrl.type !== 'changestate' && ctrl.type !== 'selfstate') continue;
                   if (ctrl.persistent === 0 && f.firedPersist.has(ctrl.id)) continue;
                   const trigText = [...ctrl.triggerAll, ...(Object.values(ctrl.triggerGroups) as string[][]).flat()];
                   if (!trigText.some(t => /animtime/i.test(t))) continue;
                   if (!doesControllerFire(ctrl, endCtx)) continue;
                   const nextS = evalMugenNumber(ctrl.valueExpr, endCtx);
-                  if (nextS !== null && nextS !== f.stateNo) {
-                    transitionFighterState(f, nextS);
-                    if (ctrl.ctrlVal !== undefined) f.ctrl = ctrl.ctrlVal;
+                  if (nextS !== null && (ctrl.type === 'selfstate' || nextS !== f.stateNo)) {
+                    if (ctrl.type === 'selfstate') {
+                      if (f.grabbedById) {
+                        const owner = findFighterById(f.grabbedById);
+                        if (owner && owner.grabTargetId === f.id) owner.grabTargetId = undefined;
+                      }
+                      f.customStateOwnerId = undefined;
+                      f.customAnimOwnerId = undefined;
+                      f.grabbedById = undefined;
+                      f.targetBindTicks = 0;
+                      if (nextS === 5100) {
+                        f.posY = 270;
+                        f.velX = 0;
+                        f.velY = 0;
+                        f.lieDownPhase = 'bounce';
+                        f.lieDownTimer = 6;
+                        transitionFighterState(f, 5100, { asHitOrGuard: true });
+                      } else {
+                        transitionFighterState(f, nextS);
+                        if (ctrl.ctrlVal !== undefined) f.ctrl = ctrl.ctrlVal;
+                      }
+                    } else {
+                      transitionFighterState(f, nextS);
+                      if (ctrl.ctrlVal !== undefined) f.ctrl = ctrl.ctrlVal;
+                    }
                     return;
                   }
                 }
@@ -2887,7 +3315,12 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
               } else if (f.isHelper) {
                 f.life = 0;
                 return;
-              } else if (stillAirborne && (isAirHoldState || (stDef && stDef.controllers.some(c => c.type === 'changestate')))) {
+              } else if (
+                f.grabbedById ||
+                f.customStateOwnerId ||
+                f.moveType === 'H' ||
+                (stillAirborne && (isAirHoldState || (stDef && stDef.controllers.some(c => c.type === 'changestate'))))
+              ) {
                 f.frameIdx = act.elements.length - 1;
               } else {
                 transitionFighterState(f, downNow ? 11 : 0);
@@ -2899,7 +3332,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
     };
 
     const getHurtBoxes = (f: FighterRuntime): ClsnBox[] => {
-      const ch = getCharForFighter(f);
+      const ch = getAnimChar(f);
       const act = ch?.airData.actions[f.animId];
       const el = act?.elements[f.frameIdx];
       const boxes = el?.clsn2 ?? act?.clsn2;
@@ -2908,11 +3341,14 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
     };
 
     const getAtkBoxes = (f: FighterRuntime): ClsnBox[] => {
-      const ch = getCharForFighter(f);
+      const ch = getAnimChar(f);
       const act = ch?.airData.actions[f.animId];
       const el = act?.elements[f.frameIdx];
       const boxes = el?.clsn1 ?? act?.clsn1 ?? [];
       if (boxes.length > 0) return boxes;
+      if (f.activeHitDef?.isThrow && f.stateTime <= 4) {
+        return [{ id: 0, x1: 0, y1: -85, x2: 52, y2: -10 }];
+      }
       if (f.isHelper && f.moveType === 'A') {
         return [{ id: 0, x1: -18, y1: -18, x2: 18, y2: 18 }];
       }
@@ -2963,6 +3399,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
         rawBaseDmg > 0 ? Math.max(1, Math.round(rawBaseDmg * (atkPowerMul / Math.max(0.1, def.defenceMul)))) : 0;
 
       def.life = Math.max(0, def.life - scaledDmg);
+      if (scaledDmg > 0) def.trailHoldTicks = 20;
       if (atk) {
         atk.power = Math.min(atk.maxPower, atk.power + (isGuarded ? hitDef.getPowerGuard : hitDef.getPowerHit));
         atk.hitPauseTicks = Math.max(2, Math.min(18, hitDef.pauseP1));
@@ -3022,11 +3459,16 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
       if (def.life <= 0 || def.invulnTicks > 0 || def.stateNo === 5110 || def.stateNo === 5120 || def.stateNo === 5150) {
         return;
       }
+      if ((atk.builtinThrowTicks ?? 0) > 0) return;
+      if (atk.grabTargetId && def.id === atk.grabTargetId && !atk.activeHitDef) return;
+      if (def.grabbedById && !atk.activeHitDef) return;
+
       const atkBoxes = getAtkBoxes(atk);
       if (atkBoxes.length === 0) return;
 
       const ch = getCharForFighter(atk);
       const states = ch?.parsed.states || {};
+      const constants = ch?.parsed.constants || DEFAULT_CONSTANTS;
 
       let hitDef = atk.activeHitDef;
       if (!hitDef && atk.moveType === 'A' && !atk.hitScoredThisWindow) {
@@ -3081,6 +3523,8 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
 
       if (!hitDef || atk.hitTargetsThisWindow.has(def.id)) return;
       if (def.posY < 270 && !hitDef.hitFlag.includes('A')) return;
+      if (hitDef.isThrow && def.grabbedById) return;
+      if (hitDef.hitFlag.includes('-') && def.moveType === 'H') return;
 
       const defBoxes = getHurtBoxes(def);
       const hitPoint = findBoxesOverlap(atkBoxes, atk, defBoxes, def);
@@ -3089,6 +3533,77 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
       atk.hitScoredThisWindow = true;
       atk.hitTargetsThisWindow.add(def.id);
       atk.moveContact = 1;
+
+      if (hitDef.isThrow && (hitDef.p1StateNo !== undefined || hitDef.p2StateNo !== undefined)) {
+        atk.moveHit = 1;
+        atk.activeHitDef = null;
+        const atkDirs = getCharHeldDirs(atk);
+        const heldCmds = new Set<string>();
+        if (atkDirs.has('F') || atk.throwFwdHeld) heldCmds.add('holdfwd');
+        if (atkDirs.has('B')) heldCmds.add('holdback');
+        if (atkDirs.has('U')) heldCmds.add('holdup');
+        if (atkDirs.has('D')) heldCmds.add('holddown');
+        const throwCtx: EvalContext = {
+          stateTime: atk.stateTime,
+          animElem: atk.frameIdx + 1,
+          animElemTick: atk.tickInFrame,
+          animId: atk.animId,
+          animTime: -1,
+          posX: atk.posX,
+          posY: atk.posY - 270,
+          velX: atk.velX,
+          velY: atk.velY,
+          stateType: atk.stateType,
+          moveType: atk.moveType,
+          physics: atk.physics,
+          stateNo: atk.stateNo,
+          prevStateNo: atk.prevStateNo,
+          ctrl: atk.ctrl,
+          life: atk.life,
+          maxLife: atk.maxLife,
+          power: atk.power,
+          maxPower: atk.maxPower,
+          moveContact: 1,
+          moveHit: 1,
+          moveGuarded: 0,
+          mode: 'fight',
+          constants,
+          heldCmds,
+          facing: atk.facing,
+        };
+        if (hitDef.p1FacingExpr) {
+          const p1f = evalMugenNumber(hitDef.p1FacingExpr, throwCtx);
+          if (p1f !== null && p1f < 0) {
+            atk.facing = atk.facing === 1 ? -1 : 1;
+          }
+        }
+        if (hitDef.p2Facing === 1) {
+          def.facing = atk.facing === 1 ? -1 : 1;
+        } else if (hitDef.p2Facing === -1) {
+          def.facing = atk.facing;
+        }
+        atk.grabTargetId = def.id;
+        def.grabbedById = atk.id;
+        def.customStateOwnerId = atk.id;
+        def.customAnimOwnerId = undefined;
+        def.targetBindTicks = 12;
+        def.velX = 0;
+        def.velY = 0;
+
+        if (hitDef.p2StateNo !== undefined) {
+          transitionFighterState(def, hitDef.p2StateNo);
+          def.grabbedById = atk.id;
+          def.customStateOwnerId = atk.id;
+          def.targetBindTicks = 12;
+        }
+        if (hitDef.p1StateNo !== undefined) {
+          transitionFighterState(atk, hitDef.p1StateNo, atk.id === 'p1' ? { label: 'Throw' } : undefined);
+          atk.grabTargetId = def.id;
+        }
+        runControllersForFighter(def, atk);
+        runControllersForFighter(atk, def);
+        return;
+      }
 
       applyHitOutcomeToDefender(hitDef, atk.charProfileId, atk.attackMul, def, hitPoint, atk);
     };
@@ -3232,8 +3747,9 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
       }
 
       const ch = getCharForFighter(f);
+      const animCh = getAnimChar(f);
       const fighterPal = getPaletteForFighter(f);
-      const act = ch?.airData.actions[f.animId];
+      const act = animCh?.airData.actions[f.animId];
       const el = act?.elements[f.frameIdx];
       let drewSprite = false;
 
@@ -3375,9 +3891,10 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
 
           // Pushbox separation
           for (const a of team1) {
-            if (a.life <= 0) continue;
+            if (a.life <= 0 || a.grabbedById) continue;
             for (const b of team2) {
-              if (b.life <= 0) continue;
+              if (b.life <= 0 || b.grabbedById) continue;
+              if (a.grabTargetId === b.id || b.grabTargetId === a.id) continue;
               if (Math.abs(a.posY - b.posY) < 48) {
                 const minSep = 30;
                 const dx = b.posX - a.posX;
@@ -3397,7 +3914,9 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
           const living = allFighters.filter(f => f.life > 0);
           const camGroup = living.length > 0 ? living : allFighters;
           for (const f of allFighters) {
-            f.posX = Math.max(-stageLimit, Math.min(stageLimit, f.posX));
+            if (!f.grabbedById) {
+              f.posX = Math.max(-stageLimit, Math.min(stageLimit, f.posX));
+            }
           }
           const minCamX = Math.min(...camGroup.map(f => f.posX));
           const maxCamX = Math.max(...camGroup.map(f => f.posX));
@@ -3406,7 +3925,9 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
 
           const screenHalfSpan = 190;
           for (const f of allFighters) {
-            f.posX = Math.max(cameraXRef.current - screenHalfSpan, Math.min(cameraXRef.current + screenHalfSpan, f.posX));
+            if (!f.grabbedById) {
+              f.posX = Math.max(cameraXRef.current - screenHalfSpan, Math.min(cameraXRef.current + screenHalfSpan, f.posX));
+            }
           }
 
           // Hit detection BEFORE anim advance so 1-tick moves hit reliably
@@ -3584,30 +4105,74 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
         }
 
         hudFrameCounter++;
-        if (hudFrameCounter % 3 === 0) {
+        const isHealthAnimating =
+          team1.some(f => Math.abs(f.trailLife - f.life) > 0.01) ||
+          team2.some(f => Math.abs(f.trailLife - f.life) > 0.01);
+        if (hudFrameCounter % 3 === 0 || isHealthAnimating) {
           const leadP2 = p2Ref.current || team2[0];
           const leadP2Slot = team2Slots[leadP2.slotIdx];
           const leadP2Hud = makeMemberHud(leadP2, leadP2Slot);
           const team1Combo = Math.max(0, ...team2.map(f => f.comboCount));
           const team2Combo = Math.max(0, ...team1.map(f => f.comboCount));
-          setFightHud({
-            team1: team1.map((f, i) => makeMemberHud(f, team1Slots[i])),
-            team2: team2.map((f, i) => makeMemberHud(f, team2Slots[i])),
-            p1Life: Math.ceil(p1.life),
-            p1Trail: Math.ceil(p1.trailLife),
-            p1MaxLife: p1.maxLife,
-            p1Power: Math.floor(p1.power),
-            p1MaxPower: p1.maxPower,
-            p1Combo: team1Combo,
-            p2Life: leadP2Hud.life,
-            p2Trail: leadP2Hud.trail,
-            p2MaxLife: leadP2Hud.maxLife,
-            p2Power: leadP2Hud.power,
-            p2MaxPower: leadP2Hud.maxPower,
-            p2Combo: team2Combo,
-            p2Name: leadP2Hud.name || 'Opponent',
-            p2PortraitUrl: leadP2Hud.portraitUrl || null,
-            p2StateNo: leadP2.stateNo,
+          const nextT1 = team1.map((f, i) => makeMemberHud(f, team1Slots[i]));
+          const nextT2 = team2.map((f, i) => makeMemberHud(f, team2Slots[i]));
+          const p1Life = Math.ceil(p1.life);
+          const p1Trail = Math.round(p1.trailLife * 100) / 100;
+          const p1Power = Math.floor(p1.power);
+          const p2Name = leadP2Hud.name || 'Opponent';
+          const p2PortraitUrl = leadP2Hud.portraitUrl || null;
+          setFightHud(prev => {
+            const membersEqual = (a: FightMemberHud[], b: FightMemberHud[]) =>
+              a.length === b.length &&
+              a.every(
+                (m, idx) =>
+                  m.id === b[idx].id &&
+                  m.life === b[idx].life &&
+                  m.trail === b[idx].trail &&
+                  m.power === b[idx].power &&
+                  m.stateNo === b[idx].stateNo &&
+                  m.comboCount === b[idx].comboCount
+              );
+            if (
+              prev.p1Life === p1Life &&
+              prev.p1Trail === p1Trail &&
+              prev.p1MaxLife === p1.maxLife &&
+              prev.p1Power === p1Power &&
+              prev.p1MaxPower === p1.maxPower &&
+              prev.p1Combo === team1Combo &&
+              prev.p2Life === leadP2Hud.life &&
+              prev.p2Trail === leadP2Hud.trail &&
+              prev.p2MaxLife === leadP2Hud.maxLife &&
+              prev.p2Power === leadP2Hud.power &&
+              prev.p2MaxPower === leadP2Hud.maxPower &&
+              prev.p2Combo === team2Combo &&
+              prev.p2Name === p2Name &&
+              prev.p2PortraitUrl === p2PortraitUrl &&
+              prev.p2StateNo === leadP2.stateNo &&
+              membersEqual(prev.team1, nextT1) &&
+              membersEqual(prev.team2, nextT2)
+            ) {
+              return prev;
+            }
+            return {
+              team1: nextT1,
+              team2: nextT2,
+              p1Life,
+              p1Trail,
+              p1MaxLife: p1.maxLife,
+              p1Power,
+              p1MaxPower: p1.maxPower,
+              p1Combo: team1Combo,
+              p2Life: leadP2Hud.life,
+              p2Trail: leadP2Hud.trail,
+              p2MaxLife: leadP2Hud.maxLife,
+              p2Power: leadP2Hud.power,
+              p2MaxPower: leadP2Hud.maxPower,
+              p2Combo: team2Combo,
+              p2Name,
+              p2PortraitUrl,
+              p2StateNo: leadP2.stateNo,
+            };
           });
         }
       }
@@ -4627,18 +5192,18 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
                     </div>
                     <div className="h-3.5 bg-zinc-950 border border-zinc-700 rounded overflow-hidden relative">
                       <div
-                        className="absolute inset-y-0 right-0 bg-red-600 transition-all duration-150"
+                        className="absolute inset-y-0 right-0 bg-rose-500/90"
                         style={{ width: `${Math.max(0, Math.min(100, (fightHud.p1Trail / Math.max(1, fightHud.p1MaxLife)) * 100))}%` }}
                       />
                       <div
-                        className="absolute inset-y-0 right-0 bg-gradient-to-l from-emerald-400 to-lime-300"
+                        className="absolute inset-y-0 right-0 bg-gradient-to-l from-emerald-400 to-lime-300 transition-[width] duration-150 ease-out"
                         style={{ width: `${Math.max(0, Math.min(100, (fightHud.p1Life / Math.max(1, fightHud.p1MaxLife)) * 100))}%` }}
                       />
                     </div>
                     <div className="mt-1 flex items-center justify-between gap-2">
                       <div className="flex-1 h-2 bg-zinc-950 border border-zinc-800 rounded overflow-hidden">
                         <div
-                          className="h-full bg-gradient-to-r from-cyan-500 to-sky-300"
+                          className="h-full bg-gradient-to-r from-cyan-500 to-sky-300 transition-[width] duration-100 ease-out"
                           style={{ width: `${Math.max(0, Math.min(100, (fightHud.p1Power / Math.max(1, fightHud.p1MaxPower)) * 100))}%` }}
                         />
                       </div>
@@ -4703,18 +5268,18 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
                     </div>
                     <div className="h-3.5 bg-zinc-950 border border-zinc-700 rounded overflow-hidden relative">
                       <div
-                        className="absolute inset-y-0 left-0 bg-yellow-300 transition-all duration-150"
+                        className="absolute inset-y-0 left-0 bg-amber-400/90"
                         style={{ width: `${Math.max(0, Math.min(100, (fightHud.p2Trail / Math.max(1, fightHud.p2MaxLife)) * 100))}%` }}
                       />
                       <div
-                        className="absolute inset-y-0 left-0 bg-gradient-to-r from-rose-500 to-orange-400"
+                        className="absolute inset-y-0 left-0 bg-gradient-to-r from-rose-500 to-orange-400 transition-[width] duration-150 ease-out"
                         style={{ width: `${Math.max(0, Math.min(100, (fightHud.p2Life / Math.max(1, fightHud.p2MaxLife)) * 100))}%` }}
                       />
                     </div>
                     <div className="mt-1 flex items-center justify-between gap-2 flex-row-reverse">
                       <div className="flex-1 h-2 bg-zinc-950 border border-zinc-800 rounded overflow-hidden">
                         <div
-                          className="h-full bg-gradient-to-l from-amber-500 to-rose-400 ml-auto"
+                          className="h-full bg-gradient-to-l from-amber-500 to-rose-400 ml-auto transition-[width] duration-100 ease-out"
                           style={{ width: `${Math.max(0, Math.min(100, (fightHud.p2Power / Math.max(1, fightHud.p2MaxPower)) * 100))}%` }}
                         />
                       </div>
@@ -4862,7 +5427,7 @@ export const VersusArena: React.FC<VersusArenaProps> = ({ onBackToHome }) => {
                     .map(b => `${formatKeyLabel(b.key)}(${b.label})`)
                     .join(' ')}
                 </span>
-                <span>Taunt: Space / Enter</span>
+                <span>Throw: F/B+Y · Taunt: Space / Enter</span>
               </div>
               {renderExternalActionPad(isLandscapeShort)}
             </div>
